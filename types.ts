@@ -1,4 +1,5 @@
 export type SlotStatus = 'available' | 'occupied' | 'reserved' | 'maintenance';
+export type RentalType = 'weekly' | 'monthly' | 'daily';
 
 export interface Slot {
   id: string;
@@ -10,6 +11,16 @@ export interface Slot {
   startDate?: string;
   endDate?: string;
   notes?: string;
+  contactName?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  contactRvType?: string;
+  contactLicensePlate?: string;
+  contactEmergency?: string;
+  contactNotes?: string;
+  rentAmount?: number;
+  rentalType?: RentalType;
+  balanceDue?: number;
 }
 
 export interface Tenant {
@@ -17,10 +28,46 @@ export interface Tenant {
   name: string;
   site: string;
   status: string;
+  rentalType?: RentalType;
   imageUrl?: string;
   startDate?: string;
   endDate?: string;
   description?: string;
+  phone?: string;
+  email?: string;
+  rvType?: string;
+  licensePlate?: string;
+  emergencyContact?: string;
+  notes?: string;
+}
+
+export interface PaymentRecord {
+  id: string;
+  date: string;
+  amount: number;
+  method: string;
+  note?: string;
+}
+
+export interface MeterRecord {
+  id: string;
+  date: string;
+  reading: number;
+  previousReading: number;
+  usage: number;
+  note?: string;
+}
+
+export interface TenantPayment {
+  tenantId: string;
+  rentalType?: RentalType;
+  rentAmount: number;
+  currentReadingTotal: number;
+  baselineCredit?: number;
+  balanceDue: number;
+  previousMeterReading?: number;
+  records: PaymentRecord[];
+  meterRecords?: MeterRecord[];
 }
 
 export interface Photo {

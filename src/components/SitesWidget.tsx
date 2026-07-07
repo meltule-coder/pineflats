@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { MapPin, RefreshCw, ExternalLink, LogOut, Grid3x3 } from 'lucide-react';
-import { Slot, SlotStatus } from '../../types';
+import { MapPin, RefreshCw, ExternalLink, LogOut, Grid3x3, FileText, Save, UserPlus } from 'lucide-react';
+import { ReceiptLink } from './ReceiptLink';
+import { Slot, SlotStatus, RentalType } from '../../types';
+import { rentAmountForType, formatDailyRateDescription } from '../../rentUtils';
 import { googleSignIn, getAccessToken, initAuth, logout } from '../lib/auth';
 
 const STATUS_STYLES: Record<SlotStatus, string> = {
@@ -18,6 +20,21 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
   const [sheetConnected, setSheetConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
+  const [receiptDocUrl, setReceiptDocUrl] = useState('');
+  const [receiptConnected, setReceiptConnected] = useState(false);
+  const [contactForm, setContactForm] = useState({
+    contactName: '',
+    contactPhone: '',
+    contactEmail: '',
+    contactRvType: '',
+    contactLicensePlate: '',
+    contactEmergency: '',
+    contactNotes: '',
+    rentalType: 'monthly' as RentalType,
+    rentAmount: '750',
+    balanceDue: '750',
+  });
+  const [formSaved, setFormSaved] = useState(false);
 
   const loadSlots = async () => {
     const res = await fetch('/api/slots');
@@ -37,9 +54,33 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     }
   };
 
+  const loadReceiptConfig = async () => {
+    const res = await fetch('/api/receipts/config');
+    if (res.ok) {
+      const data = await res.json();
+      setReceiptDocUrl(data.receiptDocUrl ?? '');
+      setReceiptConnected(!!data.receiptDocId);
+    }
+  };
+
+  const handleSaveReceiptDoc = async () => {
+    setIsLoading(true);
+    try {
+      const res = await fetch('/api/receipts/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ docUrl: receiptDocUrl }),
+      });
+      if (res.ok) await loadReceiptConfig();
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadSlots();
     loadSheetStatus();
+    loadReceiptConfig();
     initAuth(
       (_user, t) => setToken(t),
       () => setToken(null)
@@ -113,6 +154,28 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     }
   };
 
+  const loadContactForm = (slot: Slot) => {
+    const defaultRent = String(rentAmountForType(slot.rentalType ?? 'monthly'));
+    setContactForm({
+      contactName: slot.contactName ?? '',
+      contactPhone: slot.contactPhone ?? '',
+      contactEmail: slot.contactEmail ?? '',
+      contactRvType: slot.contactRvType ?? '',
+      contactLicensePlate: slot.contactLicensePlate ?? '',
+      contactEmergency: slot.contactEmergency ?? '',
+      contactNotes: slot.contactNotes ?? '',
+      rentalType: slot.rentalType ?? 'monthly',
+      rentAmount: String(slot.rentAmount ?? defaultRent),
+      balanceDue: String(slot.balanceDue ?? slot.rentAmount ?? defaultRent),
+    });
+    setFormSaved(false);
+  };
+
+  const handleSelectSlot = (slot: Slot) => {
+    setSelectedSlot(slot);
+    loadContactForm(slot);
+  };
+
   const handleSlotUpdate = async (slot: Slot, status: SlotStatus) => {
     const res = await fetch(`/api/slots/${slot.id}`, {
       method: 'PUT',
@@ -123,6 +186,67 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
       await loadSlots();
       onUpdate();
       setSelectedSlot(null);
+    }
+  };
+
+  const handleRentalTypeChange = (rentalType: RentalType) => {
+    const rentAmount = String(rentAmountForType(rentalType));
+    setContactForm(prev => ({ ...prev, rentalType, rentAmount, balanceDue: rentAmount }));
+    setFormSaved(false);
+  };
+
+  const handleSaveContactPayment = async () => {
+    if (!selectedSlot) return;
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/api/slots/${selectedSlot.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contactName: contactForm.contactName,
+          contactPhone: contactForm.contactPhone,
+          contactEmail: contactForm.contactEmail,
+          contactRvType: contactForm.contactRvType,
+          contactLicensePlate: contactForm.contactLicensePlate,
+          contactEmergency: contactForm.contactEmergency,
+          contactNotes: contactForm.contactNotes,
+          rentalType: contactForm.rentalType,
+          rentAmount: parseFloat(contactForm.rentAmount) || 0,
+          balanceDue: parseFloat(contactForm.balanceDue) || 0,
+        }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setSelectedSlot(updated);
+        await loadSlots();
+        setFormSaved(true);
+        setTimeout(() => setFormSaved(false), 2500);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleAddTenant = async () => {
+    if (!selectedSlot || !contactForm.contactName.trim()) return;
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/api/slots/${selectedSlot.id}/add-tenant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...contactForm,
+          rentAmount: parseFloat(contactForm.rentAmount) || 0,
+          balanceDue: parseFloat(contactForm.balanceDue) || 0,
+        }),
+      });
+      if (res.ok) {
+        await loadSlots();
+        onUpdate();
+        setSelectedSlot(null);
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -216,11 +340,43 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
         </div>
       ) : null}
 
+      <div className="bg-white rounded-[32px] p-6 shadow-sm border border-[#E2D9D0]">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 bg-[#EDE7E1] rounded-xl flex items-center justify-center">
+            <FileText className="w-5 h-5 text-[#5A6355]" />
+          </div>
+          <div>
+            <h3 className="text-sm font-serif text-[#3D3730]">Numbered Receipt Google Doc</h3>
+            <p className="text-xs text-[#5A6355]">Link each space to its matching receipt page number</p>
+          </div>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-3">
+          <input
+            type="url"
+            value={receiptDocUrl}
+            onChange={e => setReceiptDocUrl(e.target.value)}
+            placeholder="Paste your Google Doc URL (https://docs.google.com/document/d/...)"
+            className="flex-1 px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+          />
+          <button
+            onClick={handleSaveReceiptDoc}
+            disabled={isLoading || !receiptDocUrl}
+            className="flex items-center justify-center gap-2 bg-[#5A6355] text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50"
+          >
+            <Save className="w-4 h-4" />
+            Link Receipts
+          </button>
+        </div>
+        {receiptConnected && (
+          <p className="text-xs text-[#3D5A3D] mt-3">Receipt doc linked — each space opens its numbered page.</p>
+        )}
+      </div>
+
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
         {slots.map(slot => (
           <button
             key={slot.id}
-            onClick={() => setSelectedSlot(slot)}
+            onClick={() => handleSelectSlot(slot)}
             className={`p-4 rounded-2xl border-2 text-left transition hover:scale-[1.02] active:scale-[0.98] ${STATUS_STYLES[slot.status]}`}
           >
             <div className="flex items-center gap-1.5 mb-1">
@@ -230,6 +386,9 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
             <div className="text-[10px] uppercase tracking-wider opacity-70">{slot.status}</div>
             {slot.tenantName && (
               <div className="text-xs mt-1 truncate opacity-80">{slot.tenantName}</div>
+            )}
+            {slot.status === 'available' && slot.contactName && (
+              <div className="text-xs mt-1 truncate opacity-80">{slot.contactName}</div>
             )}
           </button>
         ))}
@@ -246,13 +405,161 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
 
       {selectedSlot && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={() => setSelectedSlot(null)}>
-          <div className="bg-white rounded-[32px] p-6 max-w-sm w-full shadow-2xl border border-[#E2D9D0]" onClick={e => e.stopPropagation()}>
+          <div
+            className={`bg-white rounded-[32px] p-6 w-full shadow-2xl border border-[#E2D9D0] max-h-[90vh] overflow-y-auto ${selectedSlot.status === 'available' ? 'max-w-2xl' : 'max-w-sm'}`}
+            onClick={e => e.stopPropagation()}
+          >
             <h3 className="text-xl font-serif text-[#3D3730] mb-1">{selectedSlot.label}</h3>
             <p className="text-sm text-[#5A6355] mb-4 capitalize">Currently: {selectedSlot.status}</p>
             {selectedSlot.tenantName && (
               <p className="text-sm mb-4">Tenant: <strong>{selectedSlot.tenantName}</strong></p>
             )}
+
+            {selectedSlot.status === 'available' && (
+              <div className="space-y-5 mb-6">
+                <div>
+                  <h4 className="text-sm font-serif text-[#3D3730] border-b border-[#E2D9D0] pb-2 mb-4">Contact Information</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-2 sm:col-span-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Name</label>
+                      <input
+                        value={contactForm.contactName}
+                        onChange={e => { setContactForm(prev => ({ ...prev, contactName: e.target.value })); setFormSaved(false); }}
+                        placeholder="Full name"
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Phone</label>
+                      <input
+                        value={contactForm.contactPhone}
+                        onChange={e => { setContactForm(prev => ({ ...prev, contactPhone: e.target.value })); setFormSaved(false); }}
+                        placeholder="Phone number"
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Email</label>
+                      <input
+                        type="email"
+                        value={contactForm.contactEmail}
+                        onChange={e => { setContactForm(prev => ({ ...prev, contactEmail: e.target.value })); setFormSaved(false); }}
+                        placeholder="Email address"
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">RV Type</label>
+                      <input
+                        value={contactForm.contactRvType}
+                        onChange={e => { setContactForm(prev => ({ ...prev, contactRvType: e.target.value })); setFormSaved(false); }}
+                        placeholder="e.g. Travel trailer"
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">License Plate</label>
+                      <input
+                        value={contactForm.contactLicensePlate}
+                        onChange={e => { setContactForm(prev => ({ ...prev, contactLicensePlate: e.target.value })); setFormSaved(false); }}
+                        placeholder="License plate"
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                    <div className="space-y-2 sm:col-span-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Emergency Contact</label>
+                      <input
+                        value={contactForm.contactEmergency}
+                        onChange={e => { setContactForm(prev => ({ ...prev, contactEmergency: e.target.value })); setFormSaved(false); }}
+                        placeholder="Emergency contact"
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                    <div className="space-y-2 sm:col-span-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Notes</label>
+                      <textarea
+                        value={contactForm.contactNotes}
+                        onChange={e => { setContactForm(prev => ({ ...prev, contactNotes: e.target.value })); setFormSaved(false); }}
+                        placeholder="Additional notes"
+                        rows={2}
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355] resize-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-sm font-serif text-[#3D3730] border-b border-[#E2D9D0] pb-2 mb-4">Payment Information</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Rental Type</label>
+                      <select
+                        value={contactForm.rentalType}
+                        onChange={e => handleRentalTypeChange(e.target.value as RentalType)}
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      >
+                        <option value="monthly">Monthly ($750)</option>
+                        <option value="weekly">Weekly ($250)</option>
+                        <option value="daily">Daily ({formatDailyRateDescription()})</option>
+                      </select>
+                      {contactForm.rentalType === 'daily' && (
+                        <p className="text-xs text-[#5A6355]">
+                          Today&apos;s rate: ${rentAmountForType('daily').toFixed(2)}
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Rent Due ($)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={contactForm.rentAmount}
+                        onChange={e => { setContactForm(prev => ({ ...prev, rentAmount: e.target.value })); setFormSaved(false); }}
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Balance Due ($)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={contactForm.balanceDue}
+                        onChange={e => { setContactForm(prev => ({ ...prev, balanceDue: e.target.value })); setFormSaved(false); }}
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button
+                    onClick={handleSaveContactPayment}
+                    disabled={isLoading}
+                    className="flex-1 flex items-center justify-center gap-2 bg-[#5A6355] text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50"
+                  >
+                    <Save className="w-4 h-4" />
+                    {formSaved ? 'Saved' : 'Save Contact & Payment'}
+                  </button>
+                  <button
+                    onClick={handleAddTenant}
+                    disabled={isLoading || !contactForm.contactName.trim()}
+                    className="flex-1 flex items-center justify-center gap-2 bg-[#C29474] text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-[#A87A5E] transition disabled:opacity-50"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                    Add as Tenant
+                  </button>
+                </div>
+              </div>
+            )}
+
             <p className="text-xs text-[#5A6355] mb-4 uppercase tracking-wider">Change status</p>
+            {receiptConnected && (
+              <div className="mb-4">
+                <ReceiptLink spaceNumber={String(selectedSlot.number)} variant="button" />
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2">
               {(['available', 'occupied', 'reserved', 'maintenance'] as SlotStatus[]).map(status => (
                 <button

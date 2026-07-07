@@ -15,33 +15,19 @@ import {
 import {
   createSlotsSpreadsheet, writeSlotsToSheet, readSlotsFromSheet, getSpreadsheetUrl
 } from './server/googleSheets';
+import {
+  getTenants, getTenant, updateTenant, addTenant, removeTenantByName, findTenantByName, nextTenantId
+} from './server/tenantsStore';
+import {
+  getTenantPayment, updateTenantPayment, addPaymentRecord, addMeterRecord
+} from './server/paymentsStore';
+import {
+  getReceiptConfig, setReceiptDocUrl, getReceiptUrlForSpace
+} from './server/receiptsStore';
+import { rentAmountForType } from './rentUtils';
 
 // Initialize Gemini API
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-// Using in-memory state for mock data
-let tenants = [
-  { 
-    id: '1', 
-    name: 'John Doe', 
-    site: 'A1', 
-    status: 'Active',
-    imageUrl: 'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=400',
-    startDate: '2024-05-01',
-    endDate: '2024-10-31',
-    description: 'Travel trailer. Needs 50amp hookup.'
-  },
-  { 
-    id: '2', 
-    name: 'Jane Smith', 
-    site: 'B4', 
-    status: 'Active',
-    imageUrl: 'https://images.unsplash.com/photo-1478131143081-80f7f84ca84d?auto=format&fit=crop&q=80&w=400',
-    startDate: '2023-01-15',
-    endDate: '2025-01-15',
-    description: 'Long term resident. Fifth wheel.'
-  },
-];
 
 let photos = [
   { id: '1', url: 'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=400', caption: 'Campground Entrance' },
@@ -64,7 +50,82 @@ async function startServer() {
 
   // Data routes
   app.get('/api/tenants', (req, res) => {
-    res.json(tenants);
+    res.json(getTenants());
+  });
+
+  app.get('/api/tenants/:id', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    res.json(tenant);
+  });
+
+  app.put('/api/tenants/:id', (req, res) => {
+    const updated = updateTenant(req.params.id, req.body);
+    if (!updated) return res.status(404).json({ error: 'Tenant not found' });
+    res.json(updated);
+  });
+
+  app.get('/api/tenants/:id/payments', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    res.json(getTenantPayment(req.params.id));
+  });
+
+  app.put('/api/tenants/:id/payments', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const updated = updateTenantPayment(req.params.id, req.body);
+    res.json(updated);
+  });
+
+  app.post('/api/tenants/:id/payments/record', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const { date, amount, method, note } = req.body;
+    if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+    const updated = addPaymentRecord(req.params.id, {
+      date: date || new Date().toISOString().split('T')[0],
+      amount: Number(amount),
+      method: method || 'Cash',
+      note,
+    });
+    res.json(updated);
+  });
+
+  app.post('/api/tenants/:id/payments/meter', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const { date, reading, note } = req.body;
+    if (reading === undefined || reading === null || Number(reading) < 0) {
+      return res.status(400).json({ error: 'Invalid meter reading' });
+    }
+    const updated = addMeterRecord(req.params.id, {
+      date: date || new Date().toISOString().split('T')[0],
+      reading: Number(reading),
+      note,
+    });
+    res.json(updated);
+  });
+
+  app.get('/api/receipts/config', (req, res) => {
+    res.json(getReceiptConfig());
+  });
+
+  app.put('/api/receipts/config', (req, res) => {
+    try {
+      const { docUrl } = req.body;
+      if (!docUrl) return res.status(400).json({ error: 'Google Doc URL required' });
+      const config = setReceiptDocUrl(docUrl);
+      res.json(config);
+    } catch (error) {
+      res.status(400).json({ error: 'Invalid Google Doc URL' });
+    }
+  });
+
+  app.get('/api/receipts/space/:number', (req, res) => {
+    const url = getReceiptUrlForSpace(req.params.number);
+    if (!url) return res.status(404).json({ error: 'Receipt doc not configured' });
+    res.json({ space: req.params.number, url });
   });
 
   app.get('/api/photos', (req, res) => {
@@ -80,6 +141,79 @@ async function startServer() {
     const updated = updateSlot(req.params.id, req.body);
     if (!updated) return res.status(404).json({ error: 'Slot not found' });
     res.json(updated);
+  });
+
+  app.post('/api/slots/:id/add-tenant', (req, res) => {
+    const slots = getSlots();
+    const slot = slots.find(s => s.id === req.params.id);
+    if (!slot) return res.status(404).json({ error: 'Slot not found' });
+    if (slot.status !== 'available') {
+      return res.status(400).json({ error: 'Only available sites can add a new tenant' });
+    }
+
+    const {
+      contactName,
+      contactPhone,
+      contactEmail,
+      contactRvType,
+      contactLicensePlate,
+      contactEmergency,
+      contactNotes,
+      rentalType = 'monthly',
+      rentAmount,
+      balanceDue,
+    } = req.body;
+
+    const name = (contactName || '').trim();
+    if (!name) return res.status(400).json({ error: 'Contact name is required' });
+
+    const resolvedRent = Number(rentAmount) || rentAmountForType(rentalType);
+    const resolvedBalance = Number(balanceDue) || resolvedRent;
+    const tenantId = nextTenantId();
+
+    const tenant = addTenant({
+      id: tenantId,
+      name,
+      site: String(slot.number),
+      status: 'Active',
+      rentalType,
+      phone: contactPhone || '',
+      email: contactEmail || '',
+      rvType: contactRvType || '',
+      licensePlate: contactLicensePlate || '',
+      emergencyContact: contactEmergency || '',
+      notes: contactNotes || '',
+      endDate: 'ongoing',
+      imageUrl: 'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=400',
+    });
+
+    updateTenantPayment(tenantId, {
+      rentalType,
+      rentAmount: resolvedRent,
+      balanceDue: resolvedBalance,
+    });
+
+    assignSlot(String(slot.number), {
+      id: tenantId,
+      name,
+      endDate: 'ongoing',
+      description: contactNotes,
+    });
+
+    updateSlot(slot.id, {
+      contactName: undefined,
+      contactPhone: undefined,
+      contactEmail: undefined,
+      contactRvType: undefined,
+      contactLicensePlate: undefined,
+      contactEmergency: undefined,
+      contactNotes: undefined,
+      rentAmount: undefined,
+      rentalType: undefined,
+      balanceDue: undefined,
+    });
+
+    res.json({ tenant, slot: getSlots().find(s => s.id === slot.id) });
   });
 
   app.get('/api/sheets/status', (req, res) => {
@@ -151,6 +285,7 @@ async function startServer() {
       const { message, history } = req.body;
       
       const slots = getSlots();
+      const tenants = getTenants();
       const systemInstruction = `You are the Pine Flats RV Park Assistant. You help owners Dave and Melinda manage the RV park.
 Keep responses concise, friendly, and helpful. You can move tenants and manage photos using tools provided.
 The park has ${TOTAL_SLOTS} total sites. ${getAvailableCount()} are currently available.
@@ -224,9 +359,9 @@ Current photos: ${JSON.stringify(photos)}
           const call = response.functionCalls[0];
           if (call.name === 'moveTenant') {
               const { tenantName, newSite } = call.args as any;
-              const tenant = tenants.find(t => t.name.toLowerCase().includes(tenantName.toLowerCase()));
+              const tenant = findTenantByName(tenantName);
               if (tenant) {
-                  tenant.site = newSite;
+                  updateTenant(tenant.id, { site: newSite });
                   moveTenantSlot(tenant.name, newSite);
                   responseText = `I've moved ${tenant.name} to site ${newSite} as requested.`;
               } else {
@@ -241,17 +376,15 @@ Current photos: ${JSON.stringify(photos)}
                 status: 'Active',
                 imageUrl: 'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=400',
                 startDate: startDate || new Date().toISOString().split('T')[0],
-                endDate: endDate || 'TBD',
+                endDate: endDate || 'ongoing',
                 description: description || ''
               };
-              tenants.push(newTenant);
+              addTenant(newTenant);
               assignSlot(site, newTenant);
               responseText = `I've added ${name} to site ${site}.`;
           } else if (call.name === 'deleteTenant') {
               const { tenantName } = call.args as any;
-              const initialLen = tenants.length;
-              tenants = tenants.filter(t => !t.name.toLowerCase().includes(tenantName.toLowerCase()));
-              if (tenants.length < initialLen) {
+              if (removeTenantByName(tenantName)) {
                   clearSlotByTenant(tenantName);
                   responseText = `I've removed ${tenantName} from the system.`;
               } else {

@@ -8,7 +8,9 @@ import { ChatWidget } from './components/ChatWidget';
 import { PublicWebsite } from './components/PublicWebsite';
 import { CalendarWidget } from './components/CalendarWidget';
 import { SitesWidget } from './components/SitesWidget';
-import { Users, Image as ImageIcon, MapPin, Search, Sparkles, Globe, Calendar as CalendarIcon, Grid3x3 } from 'lucide-react';
+import { TenantDetailPage } from './components/TenantDetailPage';
+import { TenantPaymentPage } from './components/TenantPaymentPage';
+import { Users, Image as ImageIcon, Search, Sparkles, Globe, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign } from 'lucide-react';
 import { Tenant, Photo } from '../types';
 
 export default function App() {
@@ -17,6 +19,9 @@ export default function App() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [isPreviewMode, setIsPreviewMode] = useState(false);
+  const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
+  const [tenantView, setTenantView] = useState<'info' | 'payment'>('info');
+  const [searchQuery, setSearchQuery] = useState('');
 
   const loadData = async () => {
     try {
@@ -36,6 +41,10 @@ export default function App() {
 
   useEffect(() => {
     loadData();
+    const tab = new URLSearchParams(window.location.search).get('tab');
+    if (tab === 'sites' || tab === 'tenants' || tab === 'photos' || tab === 'marketing' || tab === 'calendar') {
+      setActiveTab(tab);
+    }
   }, []);
 
   if (isPreviewMode) {
@@ -138,26 +147,66 @@ export default function App() {
         </div>
 
         {/* Tab Content */}
-        {activeTab === 'tenants' && (
+        {activeTab === 'tenants' && selectedTenantId && tenantView === 'payment' && (() => {
+          const tenant = tenants.find(t => t.id === selectedTenantId);
+          if (!tenant) return null;
+          return (
+            <TenantPaymentPage
+              tenant={tenant}
+              onBack={() => setTenantView('info')}
+            />
+          );
+        })()}
+
+        {activeTab === 'tenants' && selectedTenantId && tenantView === 'info' && (() => {
+          const tenant = tenants.find(t => t.id === selectedTenantId);
+          if (!tenant) return null;
+          return (
+            <TenantDetailPage
+              tenant={tenant}
+              onBack={() => { setSelectedTenantId(null); setTenantView('info'); }}
+              onPayments={() => setTenantView('payment')}
+              onSave={async (updates) => {
+                const res = await fetch(`/api/tenants/${tenant.id}`, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(updates),
+                });
+                if (res.ok) await loadData();
+              }}
+            />
+          );
+        })()}
+
+        {activeTab === 'tenants' && !selectedTenantId && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
             <div className="flex justify-between items-center">
               <h2 className="text-xl font-serif text-[#3D3730]">Current Tenants</h2>
               <div className="relative">
                 <Search className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-[#5A6355]" />
-                <input 
-                  type="text" 
-                  placeholder="Search tenants..." 
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="Search tenants..."
                   className="pl-10 pr-4 py-3 bg-white border border-[#E2D9D0] rounded-[24px] text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355] italic shadow-sm"
                 />
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {tenants.map((t) => (
-                <div key={t.id} className="bg-white rounded-[32px] p-6 shadow-sm border border-[#E2D9D0] flex flex-col items-center text-center">
+              {[...tenants]
+                .filter(t => t.name.toLowerCase().includes(searchQuery.toLowerCase()) || t.site.includes(searchQuery))
+                .sort((a, b) => Number(a.site) - Number(b.site))
+                .map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => { setSelectedTenantId(t.id); setTenantView('info'); }}
+                  className="bg-white rounded-[32px] p-6 shadow-sm border border-[#E2D9D0] flex flex-col items-center text-center hover:border-[#5A6355] hover:shadow-md transition-all group text-left w-full"
+                >
                   <div className="w-40 h-40 rounded-[24px] overflow-hidden mb-4 border-2 border-[#F7F3F0]">
                     {t.imageUrl ? (
-                      <img src={t.imageUrl} alt={t.name} className="w-full h-full object-cover" />
+                      <img src={t.imageUrl} alt={t.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
                     ) : (
                       <div className="w-full h-full bg-[#E2D9D0] flex items-center justify-center">
                         <Users className="w-12 h-12 text-[#5A6355] opacity-50" />
@@ -166,19 +215,27 @@ export default function App() {
                   </div>
                   <h3 className="text-xl font-serif text-[#3D3730] mb-1">{t.name}</h3>
                   <div className="inline-flex items-center px-3 py-1 rounded-lg font-mono text-sm font-medium bg-[#FBF9F7] text-[#5A6355] border border-[#F0EBE6] mb-3">
-                    Lot {t.site}
+                    Space {t.site}
                   </div>
-                  {t.startDate && t.endDate && (
-                     <div className="text-xs text-[#5A6355] mb-2 uppercase tracking-wide">
-                       {t.startDate} - {t.endDate}
+                  {t.endDate && (
+                     <div className="text-xs text-[#5A6355] mb-2 tracking-wide capitalize">
+                       {t.endDate}
                      </div>
                   )}
-                  {t.description && (
-                     <p className="text-sm text-[#5A6355] line-clamp-2 mt-2 leading-relaxed">
-                       {t.description}
-                     </p>
-                  )}
-                </div>
+                  <div className="flex items-center gap-4 mt-2">
+                    <span className="flex items-center gap-1 text-xs text-[#C29474] font-medium group-hover:gap-2 transition-all">
+                      View Info <ChevronRight className="w-3.5 h-3.5" />
+                    </span>
+                    <span
+                      role="button"
+                      onClick={(e) => { e.stopPropagation(); setSelectedTenantId(t.id); setTenantView('payment'); }}
+                      className="flex items-center gap-1 text-xs text-[#5A6355] font-medium hover:text-[#3D3730] transition"
+                    >
+                      <DollarSign className="w-3.5 h-3.5" />
+                      Payments
+                    </span>
+                  </div>
+                </button>
               ))}
               {tenants.length === 0 && (
                 <div className="col-span-full py-16 text-center text-sm text-[#5A6355] bg-white rounded-[32px] border border-[#E2D9D0]">
