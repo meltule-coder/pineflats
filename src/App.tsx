@@ -49,7 +49,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between mb-8">
           <div className="flex items-center gap-3">
             <div>
-              <h1 className="text-2xl font-serif italic text-[#5A6355] font-bold">Pinecrest RV</h1>
+              <h1 className="text-2xl font-serif italic text-[#5A6355] font-bold">Pine Flats</h1>
               <p className="text-[10px] uppercase tracking-widest opacity-60">Property Management</p>
             </div>
           </div>
@@ -245,7 +245,7 @@ export default function App() {
                 </div>
                 <h3 className="text-xl font-serif text-[#3D3730]">Broadcast Updates</h3>
                 <p className="text-[#5A6355] text-sm leading-relaxed">
-                  Quickly push promotions, news, or announcements to the Pinecrest RV website and social channels. The AI Assistant can help draft your copy and automatically post to connected services.
+                  Quickly push promotions, news, or announcements to the Pine Flats website and social channels. The AI Assistant can help draft your copy and automatically post to connected services.
                 </p>
                 <div className="pt-6">
                   <textarea 

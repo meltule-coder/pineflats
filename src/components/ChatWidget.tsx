@@ -6,7 +6,7 @@ export function ChatWidget({ onUpdate }: { onUpdate: () => void }) {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([{
     role: 'model',
-    text: 'Hi Dave and Melinda! I am the Pinecrest RV assistant. How can I help you today? I can help move tenants, upload photos, or answer questions.'
+    text: 'Hi Dave and Melinda! I am the Pine Flats assistant. How can I help you today? I can help move tenants, upload photos, or answer questions.'
   }]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -66,7 +66,7 @@ export function ChatWidget({ onUpdate }: { onUpdate: () => void }) {
           <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center border border-[#E2D9D0]">
             <Bot className="w-4 h-4 text-[#5A6355]" />
           </div>
-          <h3 className="font-serif font-bold text-sm">Pinecrest Assistant</h3>
+          <h3 className="font-serif font-bold text-sm">Pine Flats Assistant</h3>
         </div>
         <button 
           onClick={() => setIsOpen(false)}
