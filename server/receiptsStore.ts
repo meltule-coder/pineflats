@@ -66,20 +66,34 @@ export function getReceiptConfig(): ReceiptConfig {
   };
 }
 
-export function setReceiptDocUrl(docUrl: string): ReceiptConfig {
-  const docId = extractDocId(docUrl);
-  if (!docId) {
-    throw new Error('Invalid Google Doc URL');
-  }
-
-  const receiptLinks = generateLinksForSpaces(docId, docUrl, [...OCCUPIED_SPACES, ...Array.from({ length: 25 }, (_, i) => i + 1)]);
+function saveReceiptDoc(docId: string, docUrl: string): ReceiptConfig {
+  const receiptLinks = generateLinksForSpaces(
+    docId,
+    docUrl,
+    [...OCCUPIED_SPACES, ...Array.from({ length: 25 }, (_, i) => i + 1)]
+  );
   const config = loadConfig();
   config.receiptDocUrl = docUrl;
   config.receiptDocId = docId;
   config.receiptLinks = receiptLinks;
   saveConfig(config);
-
   return getReceiptConfig();
+}
+
+export function setReceiptDocUrl(docUrl: string): ReceiptConfig {
+  const docId = extractDocId(docUrl);
+  if (!docId) {
+    throw new Error('Invalid Google Doc URL');
+  }
+  return saveReceiptDoc(docId, docUrl);
+}
+
+export function setReceiptDocId(docId: string, docUrl?: string): ReceiptConfig {
+  if (!docId) {
+    throw new Error('Document ID required');
+  }
+  const url = docUrl?.trim() || `https://docs.google.com/document/d/${docId}/edit`;
+  return saveReceiptDoc(docId, url);
 }
 
 export function getReceiptUrlForSpace(spaceNumber: string | number): string | null {

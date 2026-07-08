@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { Slot, SlotStatus } from '../types';
+import { parseDateKey } from '../rentUtils';
+import { SLOT_CONTACT_CLEAR } from './slotContactUtils';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const SLOTS_FILE = path.join(DATA_DIR, 'slots.json');
@@ -31,6 +33,41 @@ export function getSlots(): Slot[] {
     return slots;
   }
   return JSON.parse(fs.readFileSync(SLOTS_FILE, 'utf-8'));
+}
+
+/** Expire ended reservations and strip stale data from available sites. */
+export function maintainSlots(): Slot[] {
+  const slots = getSlots();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  let changed = false;
+
+  for (const slot of slots) {
+    if (slot.status === 'available') {
+      const hasStale = slot.contactName || slot.contactPhone || slot.contactEmail
+        || slot.tenantName || slot.tenantId || slot.startDate || slot.endDate;
+      if (hasStale) {
+        Object.assign(slot, SLOT_CONTACT_CLEAR, { status: 'available' as SlotStatus });
+        changed = true;
+      }
+    }
+
+    if (slot.status === 'reserved' && slot.endDate) {
+      try {
+        const end = parseDateKey(slot.endDate);
+        end.setHours(0, 0, 0, 0);
+        if (end <= today) {
+          Object.assign(slot, SLOT_CONTACT_CLEAR, { status: 'available' as SlotStatus });
+          changed = true;
+        }
+      } catch {
+        // ignore invalid date strings
+      }
+    }
+  }
+
+  if (changed) saveSlots(slots);
+  return slots;
 }
 
 export function saveSlots(slots: Slot[]) {

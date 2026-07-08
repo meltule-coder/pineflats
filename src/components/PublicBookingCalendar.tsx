@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, CalendarDays } from 'lucide-react';
 import { RentalType } from '../../types';
 import {
-  WEEKLY_RENT, getDailyRentForDate, rentAmountForType, calculateMonthlyStayTotal
+  rentAmountForType, calculateStayTotal, parseDateKey
 } from '../../rentUtils';
 
 function formatCurrency(amount: number) {
@@ -11,11 +11,6 @@ function formatCurrency(amount: number) {
 
 function toDateKey(date: Date) {
   return date.toISOString().split('T')[0];
-}
-
-function parseDateKey(key: string) {
-  const [y, m, d] = key.split('-').map(Number);
-  return new Date(y, m - 1, d);
 }
 
 function daysInMonth(year: number, month: number) {
@@ -28,27 +23,10 @@ function addDays(date: Date, days: number) {
   return next;
 }
 
-function calculateStayTotal(rentalType: RentalType, checkIn: Date, checkOut: Date) {
-  const nights: Date[] = [];
-  let cursor = new Date(checkIn);
-  while (cursor < checkOut) {
-    nights.push(new Date(cursor));
-    cursor = addDays(cursor, 1);
-  }
-  if (nights.length === 0) return 0;
-
-  if (rentalType === 'daily') {
-    return nights.reduce((sum, night) => sum + getDailyRentForDate(night), 0);
-  }
-  if (rentalType === 'weekly') {
-    return Math.ceil(nights.length / 7) * WEEKLY_RENT;
-  }
-  return calculateMonthlyStayTotal(nights.length);
-}
-
 interface PublicBookingCalendarProps {
   selectedRental: RentalType | null;
   availableSpots: number;
+  selectedSiteLabel?: string | null;
   checkIn: string | null;
   checkOut: string | null;
   onDatesChange: (checkIn: string | null, checkOut: string | null) => void;
@@ -57,6 +35,7 @@ interface PublicBookingCalendarProps {
 export function PublicBookingCalendar({
   selectedRental,
   availableSpots,
+  selectedSiteLabel,
   checkIn,
   checkOut,
   onDatesChange,
@@ -125,7 +104,10 @@ export function PublicBookingCalendar({
           </div>
           <div className="text-left">
             <h3 className="text-lg font-serif text-[#3D3730]">Select Your Dates</h3>
-            <p className="text-xs text-[#5A6355]">{availableSpots} spots available · tap check-in, then check-out</p>
+            <p className="text-xs text-[#5A6355]">
+              {availableSpots} spots available · tap check-in, then check-out
+              {selectedSiteLabel && <> · Site: <strong>{selectedSiteLabel}</strong></>}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">

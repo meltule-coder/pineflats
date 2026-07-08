@@ -21,6 +21,9 @@ export interface Slot {
   rentAmount?: number;
   rentalType?: RentalType;
   balanceDue?: number;
+  imageUrl?: string;
+  paymentMethod?: string;
+  bookedAt?: string;
 }
 
 export interface Tenant {
@@ -74,6 +77,37 @@ export interface Photo {
   id: string;
   url: string;
   caption: string;
+  published?: boolean;
+}
+
+export interface BookingContactInfo {
+  contactName: string;
+  contactPhone: string;
+  contactEmail: string;
+  contactRvType: string;
+  contactLicensePlate: string;
+  contactEmergency: string;
+  contactNotes: string;
+}
+
+export interface StoredCustomer {
+  id: string;
+  name: string;
+  phone: string;
+  email: string;
+  rvType?: string;
+  licensePlate?: string;
+  emergencyContact?: string;
+  notes?: string;
+  updatedAt?: string;
+}
+
+export interface ParkContact {
+  phone: string;
+  email: string;
+  contactName: string;
+  address?: string;
+  tagline: string;
 }
 
 export interface ChatMessage {

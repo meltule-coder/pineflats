@@ -1,13 +1,18 @@
-import { useState } from 'react';
-import { Photo, Tenant, RentalType } from '../../types';
+import { useEffect, useState } from 'react';
+import { Photo, Tenant, RentalType, Slot, ParkContact, BookingContactInfo } from '../../types';
+import { DEFAULT_CONTACT } from '../../contactDefaults';
 import {
-  ArrowLeft, Map, Calendar, Phone, Mail, CheckCircle2, Sun, Clock, Home
+  ArrowLeft, Map, Calendar, Phone, Mail, CheckCircle2, Sun, Clock, Home, MapPin
 } from 'lucide-react';
 import {
   WEEKLY_RENT, MONTHLY_RENT, DAILY_RENT_WEEKDAY, DAILY_RENT_WEEKEND,
   getDailyRentForDate, dailyRateLabel, formatDailyRateDescription
 } from '../../rentUtils';
 import { PublicBookingCalendar } from './PublicBookingCalendar';
+import { BookingContactPage } from './BookingContactPage';
+import { BookingPaymentPage } from './BookingPaymentPage';
+
+type BookingStep = 'browse' | 'contact' | 'payment' | 'confirmed';
 
 function formatCurrency(amount: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
@@ -36,25 +41,140 @@ const RENTAL_OPTIONS: {
     type: 'weekly',
     label: 'Weekly',
     price: formatCurrency(WEEKLY_RENT),
-    detail: 'Per week · 7-night stay',
+    detail: 'Per week · prorated over 7 nights',
     icon: Clock,
   },
   {
     type: 'monthly',
     label: 'Monthly',
     price: formatCurrency(MONTHLY_RENT),
-    detail: 'Pro-rated if under 30 days',
+    detail: 'Per month · long-term stay',
     icon: Home,
   },
 ];
 
-export function PublicWebsite({ photos, tenants, availableSpots, onBack }: { photos: Photo[], tenants: Tenant[], availableSpots: number, onBack: () => void }) {
+function phoneHref(phone: string) {
+  const digits = phone.replace(/\D/g, '');
+  return digits ? `tel:${digits}` : '#';
+}
+
+export function PublicWebsite({
+  photos,
+  tenants,
+  availableSpots,
+  contact = DEFAULT_CONTACT,
+  onBack,
+}: {
+  photos: Photo[];
+  tenants: Tenant[];
+  availableSpots: number;
+  contact?: ParkContact;
+  onBack: () => void;
+}) {
   const [selectedRental, setSelectedRental] = useState<RentalType | null>(null);
   const [checkIn, setCheckIn] = useState<string | null>(null);
   const [checkOut, setCheckOut] = useState<string | null>(null);
+  const [availableSlots, setAvailableSlots] = useState<Slot[]>([]);
+  const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
+  const [bookingStep, setBookingStep] = useState<BookingStep>('browse');
+  const [bookingContact, setBookingContact] = useState<BookingContactInfo | null>(null);
   const coverPhoto = photos.length > 0 ? photos[0].url : 'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=2000';
 
   const selectedOption = RENTAL_OPTIONS.find(o => o.type === selectedRental);
+  const selectedSite = availableSlots.find(s => s.id === selectedSiteId) ?? null;
+  const canBook = !!selectedRental && !!checkIn && !!checkOut && !!selectedSiteId;
+
+  useEffect(() => {
+    fetch('/api/slots')
+      .then(res => res.ok ? res.json() : Promise.reject())
+      .then(data => {
+        const slots = (data.slots as Slot[]).filter(s => s.status === 'available');
+        setAvailableSlots(slots);
+        setSelectedSiteId(prev => (prev && slots.some(s => s.id === prev) ? prev : null));
+      })
+      .catch(console.error);
+  }, []);
+
+  const bookButtonLabel = !selectedRental
+    ? 'Select a Rental Type Above'
+    : !selectedSiteId
+      ? 'Select a Site Below'
+      : !checkIn || !checkOut
+        ? 'Select Dates Below'
+        : `Book ${selectedOption?.label} Stay · ${selectedSite?.label}`;
+
+  const startBooking = () => {
+    if (!canBook || !selectedRental || !selectedSiteId || !checkIn || !checkOut) return;
+    setBookingStep('contact');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  if (bookingStep === 'contact' && selectedRental && selectedSite && checkIn && checkOut) {
+    return (
+      <BookingContactPage
+        siteLabel={selectedSite.label}
+        rentalLabel={selectedOption?.label ?? selectedRental}
+        rentalType={selectedRental}
+        checkIn={checkIn}
+        checkOut={checkOut}
+        onBack={() => setBookingStep('browse')}
+        onContinue={contact => {
+          setBookingContact(contact);
+          setBookingStep('payment');
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }}
+      />
+    );
+  }
+
+  if (bookingStep === 'payment' && selectedRental && selectedSite && checkIn && checkOut && bookingContact) {
+    return (
+      <BookingPaymentPage
+        slotId={selectedSite.id}
+        siteLabel={selectedSite.label}
+        rentalLabel={selectedOption?.label ?? selectedRental}
+        rentalType={selectedRental}
+        checkIn={checkIn}
+        checkOut={checkOut}
+        contact={bookingContact}
+        onBack={() => setBookingStep('contact')}
+        onComplete={() => {
+          setBookingStep('confirmed');
+          setAvailableSlots(prev => prev.filter(s => s.id !== selectedSite.id));
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }}
+      />
+    );
+  }
+
+  if (bookingStep === 'confirmed' && selectedSite && bookingContact) {
+    return (
+      <div className="min-h-screen bg-[#F7F3F0] font-sans text-[#3D3730] flex items-center justify-center px-4">
+        <div className="max-w-lg w-full bg-white rounded-[32px] border border-[#E2D9D0] p-8 shadow-sm text-center">
+          <div className="w-16 h-16 bg-[#E8F0E8] rounded-full flex items-center justify-center mx-auto mb-6">
+            <CheckCircle2 className="w-8 h-8 text-[#3D5A3D]" />
+          </div>
+          <h1 className="text-3xl font-serif mb-3">Reservation Confirmed!</h1>
+          <p className="text-sm text-[#5A6355] mb-6">
+            Thank you, <strong>{bookingContact.contactName}</strong>. Your stay at <strong>{selectedSite.label}</strong> is reserved.
+            A confirmation will be sent to <strong>{bookingContact.contactEmail}</strong>.
+          </p>
+          <button
+            onClick={() => {
+              setBookingStep('browse');
+              setBookingContact(null);
+              setSelectedSiteId(null);
+              setCheckIn(null);
+              setCheckOut(null);
+            }}
+            className="w-full bg-[#C29474] text-white px-6 py-3 rounded-xl font-semibold hover:bg-[#A87A5C] transition"
+          >
+            Book Another Stay
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-white font-sans text-gray-800 flex flex-col relative w-full overflow-y-auto">
@@ -126,6 +246,7 @@ export function PublicWebsite({ photos, tenants, availableSpots, onBack }: { pho
                 Selected: <strong>{selectedOption.label}</strong>
                 {selectedOption.type !== 'daily' && <> — {selectedOption.price}</>}
                 {selectedOption.type === 'daily' && <> — {formatCurrency(getDailyRentForDate())} today</>}
+                {selectedSite && <> · <strong>{selectedSite.label}</strong></>}
                 {checkIn && checkOut && (
                   <> · {parseDate(checkIn).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – {parseDate(checkOut).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</>
                 )}
@@ -133,15 +254,12 @@ export function PublicWebsite({ photos, tenants, availableSpots, onBack }: { pho
             )}
 
             <button
-              disabled={!selectedRental || !checkIn || !checkOut}
+              onClick={startBooking}
+              disabled={!canBook}
               className="w-full bg-[#C29474] text-white px-6 py-3 rounded-xl text-lg font-semibold shadow-lg hover:-translate-y-1 transition duration-300 flex items-center justify-center gap-2 disabled:opacity-40 disabled:hover:translate-y-0 disabled:cursor-not-allowed"
             >
               <CheckCircle2 className="w-5 h-5" />
-              {!selectedRental
-                ? 'Select a Rental Type Above'
-                : !checkIn || !checkOut
-                  ? 'Select Dates Below'
-                  : `Book ${selectedOption?.label} Stay`}
+              {bookButtonLabel}
             </button>
           </div>
         </div>
@@ -174,7 +292,7 @@ export function PublicWebsite({ photos, tenants, availableSpots, onBack }: { pho
               <Clock className="w-10 h-10 text-[#C29474] mx-auto mb-3" />
               <h3 className="text-xl font-serif text-[#3D3730] mb-2">Weekly</h3>
               <p className="text-3xl font-serif text-[#C29474] mb-2">{formatCurrency(WEEKLY_RENT)}</p>
-              <p className="text-xs text-[#5A6355] mb-4">Per week</p>
+              <p className="text-xs text-[#5A6355] mb-4">Per week · prorated beyond 7 nights</p>
               <button
                 onClick={() => setSelectedRental('weekly')}
                 className={`w-full py-2.5 rounded-xl text-sm font-semibold transition ${
@@ -190,7 +308,7 @@ export function PublicWebsite({ photos, tenants, availableSpots, onBack }: { pho
               <Home className="w-10 h-10 text-[#C29474] mx-auto mb-3" />
               <h3 className="text-xl font-serif text-[#3D3730] mb-2">Monthly</h3>
               <p className="text-3xl font-serif text-[#C29474] mb-2">{formatCurrency(MONTHLY_RENT)}</p>
-              <p className="text-xs text-[#5A6355] mb-4">$750/mo · pro-rated under 30 days</p>
+              <p className="text-xs text-[#5A6355] mb-4">Per month</p>
               <button
                 onClick={() => setSelectedRental('monthly')}
                 className={`w-full py-2.5 rounded-xl text-sm font-semibold transition ${
@@ -207,23 +325,91 @@ export function PublicWebsite({ photos, tenants, availableSpots, onBack }: { pho
       </section>
 
       <section className="py-16 px-4 bg-white">
-        <div className="max-w-3xl mx-auto">
-          <div className="text-center mb-8">
-            <h2 className="text-3xl font-serif text-[#3D3730] mb-2">Availability Calendar</h2>
-            <p className="text-sm text-[#5A6355]">
-              Pick your check-in and check-out dates after choosing a rental type.
-            </p>
+        <div className="max-w-3xl mx-auto space-y-10">
+          <div>
+            <div className="text-center mb-8">
+              <h2 className="text-3xl font-serif text-[#3D3730] mb-2">Choose Your Site</h2>
+              <p className="text-sm text-[#5A6355]">
+                {availableSlots.length > 0
+                  ? `${availableSlots.length} spot${availableSlots.length === 1 ? '' : 's'} available — tap to select your preferred site.`
+                  : 'No spots are currently available. Please check back soon or call us.'}
+              </p>
+            </div>
+
+            {availableSlots.length > 0 ? (
+              <div className="bg-white rounded-3xl border border-[#E2D9D0] p-6 shadow-sm">
+                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+                  {availableSlots.map(slot => {
+                    const isSelected = selectedSiteId === slot.id;
+                    return (
+                      <button
+                        key={slot.id}
+                        onClick={() => setSelectedSiteId(isSelected ? null : slot.id)}
+                        className={`rounded-2xl border-2 text-left transition hover:-translate-y-0.5 overflow-hidden ${
+                          isSelected
+                            ? 'bg-[#C29474] border-[#C29474] text-white shadow-md ring-2 ring-[#C29474]/30'
+                            : 'bg-[#FBF9F7] border-[#E2D9D0] text-[#3D3730] hover:border-[#C29474]'
+                        }`}
+                      >
+                        {slot.imageUrl && (
+                          <div className="aspect-[4/3] w-full overflow-hidden border-b border-black/5">
+                            <img src={slot.imageUrl} alt={slot.label} className="w-full h-full object-cover" />
+                          </div>
+                        )}
+                        <div className="p-4">
+                          <div className="flex items-center gap-1.5 mb-1">
+                            <MapPin className={`w-3.5 h-3.5 ${isSelected ? 'text-white/80' : 'text-[#5A6355]'}`} />
+                            <span className="font-serif font-bold text-sm">{slot.label}</span>
+                          </div>
+                          <div className={`text-[10px] uppercase tracking-wider ${isSelected ? 'text-white/80' : 'text-[#5A6355]'}`}>
+                            {isSelected ? 'Selected' : 'Available'}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                {selectedSite && (
+                  <p className="mt-4 text-sm text-[#5A6355] text-center">
+                    Your site: <strong className="text-[#3D3730]">{selectedSite.label}</strong>
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="bg-[#FBF9F7] rounded-3xl border border-[#E2D9D0] p-8 text-center text-sm text-[#5A6355]">
+                All 25 spots are currently occupied or reserved.
+              </div>
+            )}
           </div>
-          <PublicBookingCalendar
-            selectedRental={selectedRental}
-            availableSpots={availableSpots}
-            checkIn={checkIn}
-            checkOut={checkOut}
-            onDatesChange={(start, end) => {
-              setCheckIn(start);
-              setCheckOut(end);
-            }}
-          />
+
+          <div>
+            <div className="text-center mb-8">
+              <h2 className="text-3xl font-serif text-[#3D3730] mb-2">Availability Calendar</h2>
+              <p className="text-sm text-[#5A6355]">
+                Pick your check-in and check-out dates after choosing a rental type and site.
+              </p>
+            </div>
+            <PublicBookingCalendar
+              selectedRental={selectedRental}
+              availableSpots={availableSpots}
+              selectedSiteLabel={selectedSite?.label ?? null}
+              checkIn={checkIn}
+              checkOut={checkOut}
+              onDatesChange={(start, end) => {
+                setCheckIn(start);
+                setCheckOut(end);
+              }}
+            />
+
+            <button
+              onClick={startBooking}
+              disabled={!canBook}
+              className="mt-6 w-full bg-[#C29474] text-white px-6 py-4 rounded-xl text-lg font-semibold shadow-lg hover:-translate-y-0.5 transition duration-300 flex items-center justify-center gap-2 disabled:opacity-40 disabled:hover:translate-y-0 disabled:cursor-not-allowed"
+            >
+              <CheckCircle2 className="w-5 h-5" />
+              {bookButtonLabel}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -267,11 +453,24 @@ export function PublicWebsite({ photos, tenants, availableSpots, onBack }: { pho
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
           <div className="text-center md:text-left">
             <h3 className="text-2xl font-serif italic text-white mb-2">Pine Flats RV Park</h3>
-            <p className="text-sm opacity-60">Your home away from home.</p>
+            <p className="text-sm opacity-60">{contact.tagline || DEFAULT_CONTACT.tagline}</p>
+            {contact.address && (
+              <p className="text-xs opacity-50 mt-2">{contact.address}</p>
+            )}
           </div>
-          <div className="flex gap-6">
-            <a href="#" className="flex items-center gap-2 hover:text-white transition"><Mail className="w-4 h-4" /> Contact</a>
-            <a href="#" className="flex items-center gap-2 hover:text-white transition"><Phone className="w-4 h-4" /> 555-0199</a>
+          <div className="flex flex-wrap justify-center gap-6">
+            {contact.email && (
+              <a href={`mailto:${contact.email}`} className="flex items-center gap-2 hover:text-white transition">
+                <Mail className="w-4 h-4" />
+                {contact.contactName || contact.email}
+              </a>
+            )}
+            {contact.phone && (
+              <a href={phoneHref(contact.phone)} className="flex items-center gap-2 hover:text-white transition">
+                <Phone className="w-4 h-4" />
+                {contact.phone}
+              </a>
+            )}
           </div>
         </div>
       </footer>

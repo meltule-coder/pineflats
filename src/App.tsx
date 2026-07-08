@@ -8,16 +8,21 @@ import { ChatWidget } from './components/ChatWidget';
 import { PublicWebsite } from './components/PublicWebsite';
 import { CalendarWidget } from './components/CalendarWidget';
 import { SitesWidget } from './components/SitesWidget';
+import { PhotosWidget } from './components/PhotosWidget';
+import { ContactWidget } from './components/ContactWidget';
+import { CustomersWidget } from './components/CustomersWidget';
 import { TenantDetailPage } from './components/TenantDetailPage';
 import { TenantPaymentPage } from './components/TenantPaymentPage';
-import { Users, Image as ImageIcon, Search, Sparkles, Globe, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign } from 'lucide-react';
-import { Tenant, Photo } from '../types';
+import { Users, Image as ImageIcon, Search, Sparkles, Globe, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign, Settings } from 'lucide-react';
+import { Tenant, Photo, ParkContact } from '../types';
+import { DEFAULT_CONTACT } from '../contactDefaults';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'tenants' | 'sites' | 'photos' | 'marketing' | 'calendar'>('tenants');
+  const [activeTab, setActiveTab] = useState<'tenants' | 'sites' | 'photos' | 'marketing' | 'calendar' | 'settings'>('tenants');
   const [availableSpots, setAvailableSpots] = useState(25);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
+  const [contact, setContact] = useState<ParkContact>(DEFAULT_CONTACT);
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [tenantView, setTenantView] = useState<'info' | 'payment'>('info');
@@ -25,15 +30,17 @@ export default function App() {
 
   const loadData = async () => {
     try {
-      const [tRes, pRes, sRes] = await Promise.all([
+      const [tRes, pRes, sRes, cRes] = await Promise.all([
         fetch('/api/tenants'),
         fetch('/api/photos'),
         fetch('/api/slots'),
+        fetch('/api/contact'),
       ]);
       setTenants(await tRes.json());
       setPhotos(await pRes.json());
       const slotsData = await sRes.json();
       setAvailableSpots(slotsData.available);
+      if (cRes.ok) setContact(await cRes.json());
     } catch (e) {
       console.error(e);
     }
@@ -42,13 +49,15 @@ export default function App() {
   useEffect(() => {
     loadData();
     const tab = new URLSearchParams(window.location.search).get('tab');
-    if (tab === 'sites' || tab === 'tenants' || tab === 'photos' || tab === 'marketing' || tab === 'calendar') {
+    if (tab === 'sites' || tab === 'tenants' || tab === 'photos' || tab === 'marketing' || tab === 'calendar' || tab === 'settings') {
       setActiveTab(tab);
     }
   }, []);
 
+  const websitePhotos = photos.filter(p => p.published !== false);
+
   if (isPreviewMode) {
-    return <PublicWebsite photos={photos} tenants={tenants} availableSpots={availableSpots} onBack={() => setIsPreviewMode(false)} />;
+    return <PublicWebsite photos={websitePhotos} tenants={tenants} availableSpots={availableSpots} contact={contact} onBack={() => setIsPreviewMode(false)} />;
   }
 
   return (
@@ -143,6 +152,17 @@ export default function App() {
           >
             <CalendarIcon className="w-4 h-4" />
             Bookings
+          </button>
+          <button
+            onClick={() => setActiveTab('settings')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+              activeTab === 'settings'
+                ? 'bg-[#5A6355] text-white rounded-2xl'
+                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
+            }`}
+          >
+            <Settings className="w-4 h-4" />
+            Settings
           </button>
         </div>
 
@@ -251,42 +271,7 @@ export default function App() {
         )}
 
         {activeTab === 'photos' && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <div className="flex justify-between items-center">
-              <h2 className="text-xl font-serif text-[#3D3730]">Website Photos</h2>
-              <button className="bg-[#C29474] text-white rounded-xl px-4 py-2 text-sm font-semibold shadow-lg shadow-black/10 transition-transform active:scale-95">
-                Upload via Assistant
-              </button>
-            </div>
-            
-            <div className="bg-[#5A6355] text-[#F7F3F0] rounded-[32px] p-6 shadow-sm">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                {photos.map((p) => (
-                  <div key={p.id} className="group relative bg-[#F7F3F0] rounded-[24px] overflow-hidden border border-white/20">
-                    <div className="aspect-[4/3] w-full overflow-hidden bg-white/10 relative">
-                      <img 
-                        src={p.url} 
-                        alt={p.caption} 
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                      />
-                      <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm">
-                        <span className="text-xs bg-black/50 text-white px-3 py-1 rounded-full">Managing...</span>
-                      </div>
-                    </div>
-                    <div className="p-4 text-[#3D3730]">
-                      <p className="text-sm font-medium">{p.caption}</p>
-                      <p className="text-xs text-[#5A6355] mt-1">Live on Website</p>
-                    </div>
-                  </div>
-                ))}
-                {photos.length === 0 && (
-                  <div className="col-span-full py-12 text-center text-sm text-[#F7F3F0]/60">
-                    No photos available. Use the assistant to upload.
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+          <PhotosWidget onUpdate={loadData} />
         )}
 
         {activeTab === 'marketing' && (
@@ -321,6 +306,13 @@ export default function App() {
 
         {activeTab === 'calendar' && (
           <CalendarWidget />
+        )}
+
+        {activeTab === 'settings' && (
+          <div className="space-y-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <ContactWidget onUpdate={loadData} />
+            <CustomersWidget />
+          </div>
         )}
 
       </main>

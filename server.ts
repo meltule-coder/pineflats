@@ -6,12 +6,14 @@ const envLocal = path.resolve(process.cwd(), '.env.local');
 dotenv.config({ path: fs.existsSync(envLocal) ? envLocal : '.env' });
 import express from 'express';
 import cors from 'cors';
+import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import {
-  getSlots, updateSlot, saveSlots, assignSlot, clearSlotByTenant,
+  getSlots, maintainSlots, updateSlot, saveSlots, assignSlot, clearSlotByTenant,
   moveTenantSlot, getAvailableCount, getSpreadsheetId, setSpreadsheetId, TOTAL_SLOTS
 } from './server/slotsStore';
+
 import {
   createSlotsSpreadsheet, writeSlotsToSheet, readSlotsFromSheet, getSpreadsheetUrl
 } from './server/googleSheets';
@@ -22,19 +24,77 @@ import {
   getTenantPayment, updateTenantPayment, addPaymentRecord, addMeterRecord
 } from './server/paymentsStore';
 import {
-  getReceiptConfig, setReceiptDocUrl, getReceiptUrlForSpace
+  getReceiptConfig, setReceiptDocUrl, setReceiptDocId, getReceiptUrlForSpace, extractDocId
 } from './server/receiptsStore';
-import { rentAmountForType } from './rentUtils';
+import {
+  listDocuments, verifyDocumentAccess, createReceiptDocument, getDocumentUrl
+} from './server/googleDocs';
+import { rentAmountForType, calculateStayTotal, parseDateKey } from './rentUtils';
+import {
+  getPhotos, getPublishedPhotos, addPhoto, updatePhoto, deletePhoto, reorderPhotos
+} from './server/photosStore';
+import { getContactInfo, updateContactInfo } from './server/contactStore';
+import {
+  getCustomers, addCustomer, updateCustomer, deleteCustomer, upsertCustomer
+} from './server/customersStore';
+import { SLOT_CONTACT_CLEAR, clearSlotContactFields } from './server/slotContactUtils';
 
 // Initialize Gemini API
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-let photos = [
-  { id: '1', url: 'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=400', caption: 'Campground Entrance' },
-  { id: '2', url: 'https://images.unsplash.com/photo-1478131143081-80f7f84ca84d?auto=format&fit=crop&q=80&w=400', caption: 'Lake View Sites' },
-];
+const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
+const SITES_UPLOADS_DIR = path.join(UPLOADS_DIR, 'sites');
+if (!fs.existsSync(SITES_UPLOADS_DIR)) {
+  fs.mkdirSync(SITES_UPLOADS_DIR, { recursive: true });
+}
+
+const imageUploadOptions = {
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req: express.Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed'));
+  },
+};
+
+const photoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname) || '.jpg';
+      const base = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9.-]/g, '_').slice(0, 40) || 'photo';
+      cb(null, `${Date.now()}-${base}${ext}`);
+    },
+  }),
+  ...imageUploadOptions,
+});
+
+const sitePhotoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, SITES_UPLOADS_DIR),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname) || '.jpg';
+      const slotId = (req.params as { id?: string }).id ?? 'site';
+      cb(null, `${slotId}-${Date.now()}${ext}`);
+    },
+  }),
+  ...imageUploadOptions,
+});
+
+function deleteUploadedImage(imageUrl?: string) {
+  if (!imageUrl?.startsWith('/uploads/')) return;
+  const filePath = path.join(process.cwd(), imageUrl);
+  if (fs.existsSync(filePath)) {
+    try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+  }
+}
 
 async function startServer() {
+  maintainSlots();
+
   const app = express();
   const PORT = 3000;
 
@@ -111,14 +171,77 @@ async function startServer() {
     res.json(getReceiptConfig());
   });
 
-  app.put('/api/receipts/config', (req, res) => {
+  app.put('/api/receipts/config', async (req, res) => {
     try {
-      const { docUrl } = req.body;
+      const { docUrl, docId } = req.body;
+      const token = req.headers.authorization?.replace('Bearer ', '');
+
+      if (docId) {
+        if (token) await verifyDocumentAccess(token, docId);
+        const config = setReceiptDocId(docId, docUrl);
+        return res.json(config);
+      }
+
       if (!docUrl) return res.status(400).json({ error: 'Google Doc URL required' });
+
+      const parsedId = extractDocId(docUrl);
+      if (token && parsedId) await verifyDocumentAccess(token, parsedId);
+
       const config = setReceiptDocUrl(docUrl);
       res.json(config);
     } catch (error) {
-      res.status(400).json({ error: 'Invalid Google Doc URL' });
+      console.error('Receipt config error:', error);
+      res.status(400).json({ error: 'Invalid or inaccessible Google Doc' });
+    }
+  });
+
+  app.get('/api/docs/list', async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) return res.status(401).json({ error: 'Google sign-in required' });
+
+      const documents = await listDocuments(token);
+      res.json({ documents });
+    } catch (error) {
+      console.error('Docs list error:', error);
+      res.status(500).json({ error: 'Failed to list Google Docs' });
+    }
+  });
+
+  app.post('/api/docs/connect', async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) return res.status(401).json({ error: 'Google sign-in required' });
+
+      const { docId, docUrl } = req.body;
+      if (!docId) return res.status(400).json({ error: 'Document ID required' });
+
+      const { title } = await verifyDocumentAccess(token, docId);
+      const url = docUrl || getDocumentUrl(docId);
+      const config = setReceiptDocId(docId, url);
+      res.json({ ...config, title });
+    } catch (error) {
+      console.error('Docs connect error:', error);
+      res.status(400).json({ error: 'Cannot access this Google Doc' });
+    }
+  });
+
+  app.post('/api/docs/setup', async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) return res.status(401).json({ error: 'Google sign-in required' });
+
+      const { docId, url } = await createReceiptDocument(token);
+      const config = setReceiptDocId(docId, url);
+      res.json({
+        docId,
+        url,
+        config,
+        message: 'Receipt document created with 25 numbered pages',
+      });
+    } catch (error) {
+      console.error('Docs setup error:', error);
+      res.status(500).json({ error: 'Failed to create Google Doc' });
     }
   });
 
@@ -128,19 +251,260 @@ async function startServer() {
     res.json({ space: req.params.number, url });
   });
 
+  app.use('/uploads', express.static(UPLOADS_DIR));
+
+  app.get('/api/contact', (req, res) => {
+    res.json(getContactInfo());
+  });
+
+  app.put('/api/contact', (req, res) => {
+    const { phone, email, contactName, address, tagline } = req.body;
+    if (!phone || typeof phone !== 'string' || !phone.trim()) {
+      return res.status(400).json({ error: 'Phone number is required' });
+    }
+    res.json(updateContactInfo({ phone, email, contactName, address, tagline }));
+  });
+
   app.get('/api/photos', (req, res) => {
-    res.json(photos);
+    const publishedOnly = req.query.published === 'true';
+    res.json(publishedOnly ? getPublishedPhotos() : getPhotos());
+  });
+
+  app.post('/api/photos', (req, res) => {
+    const { url, caption, published } = req.body;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ error: 'Photo URL is required' });
+    }
+    const photo = addPhoto({
+      url,
+      caption: (caption || 'Park Photo').trim(),
+      published: published !== false,
+    });
+    res.status(201).json(photo);
+  });
+
+  app.post('/api/photos/upload', (req, res) => {
+    photoUpload.single('photo')(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({ error: err.message || 'Upload failed' });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: 'No photo file provided' });
+      }
+      const caption = (req.body.caption || 'Park Photo').trim();
+      const published = req.body.published !== 'false';
+      const photo = addPhoto({
+        url: `/uploads/${req.file.filename}`,
+        caption,
+        published,
+      });
+      res.status(201).json(photo);
+    });
+  });
+
+  app.put('/api/photos/reorder', (req, res) => {
+    const { orderedIds } = req.body;
+    if (!Array.isArray(orderedIds)) {
+      return res.status(400).json({ error: 'orderedIds array required' });
+    }
+    res.json(reorderPhotos(orderedIds));
+  });
+
+  app.put('/api/photos/:id', (req, res) => {
+    const updated = updatePhoto(req.params.id, req.body);
+    if (!updated) return res.status(404).json({ error: 'Photo not found' });
+    res.json(updated);
+  });
+
+  app.delete('/api/photos/:id', (req, res) => {
+    const photos = getPhotos();
+    const photo = photos.find(p => p.id === req.params.id);
+    if (!photo) return res.status(404).json({ error: 'Photo not found' });
+
+    if (photo.url.startsWith('/uploads/')) {
+      const filePath = path.join(process.cwd(), photo.url);
+      if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+      }
+    }
+
+    deletePhoto(req.params.id);
+    res.json({ ok: true });
   });
 
   app.get('/api/slots', (req, res) => {
-    const slots = getSlots();
-    res.json({ slots, total: TOTAL_SLOTS, available: getAvailableCount() });
+    const slots = maintainSlots();
+    res.json({
+      slots,
+      total: TOTAL_SLOTS,
+      available: slots.filter(s => s.status === 'available').length,
+    });
   });
 
   app.put('/api/slots/:id', (req, res) => {
-    const updated = updateSlot(req.params.id, req.body);
-    if (!updated) return res.status(404).json({ error: 'Slot not found' });
+    const slots = getSlots();
+    const slot = slots.find(s => s.id === req.params.id);
+    if (!slot) return res.status(404).json({ error: 'Slot not found' });
+
+    const updates = { ...req.body };
+    if (updates.imageUrl === null || updates.imageUrl === '') {
+      deleteUploadedImage(slot.imageUrl);
+      updates.imageUrl = undefined;
+    } else if (
+      typeof updates.imageUrl === 'string'
+      && updates.imageUrl !== slot.imageUrl
+      && slot.imageUrl?.startsWith('/uploads/')
+    ) {
+      deleteUploadedImage(slot.imageUrl);
+    }
+
+    if (updates.status === 'available') {
+      Object.assign(updates, clearSlotContactFields({}));
+    }
+
+    const updated = updateSlot(req.params.id, updates);
     res.json(updated);
+  });
+
+  app.get('/api/customers', (_req, res) => {
+    res.json(getCustomers());
+  });
+
+  app.post('/api/customers', (req, res) => {
+    const { name, phone, email, rvType, licensePlate, emergencyContact, notes } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Customer name is required' });
+    }
+    const customer = addCustomer({ name, phone, email, rvType, licensePlate, emergencyContact, notes });
+    res.status(201).json(customer);
+  });
+
+  app.post('/api/customers/upsert', (req, res) => {
+    const { name, phone, email, rvType, licensePlate, emergencyContact, notes } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Customer name is required' });
+    }
+    res.json(upsertCustomer({ name, phone, email, rvType, licensePlate, emergencyContact, notes }));
+  });
+
+  app.put('/api/customers/:id', (req, res) => {
+    const updated = updateCustomer(req.params.id, req.body);
+    if (!updated) return res.status(404).json({ error: 'Customer not found' });
+    res.json(updated);
+  });
+
+  app.delete('/api/customers/:id', (req, res) => {
+    if (!deleteCustomer(req.params.id)) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+    res.json({ ok: true });
+  });
+
+  app.post('/api/slots/:id/photo', (req, res) => {
+    sitePhotoUpload.single('photo')(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({ error: err.message || 'Upload failed' });
+      }
+      const slots = getSlots();
+      const slot = slots.find(s => s.id === req.params.id);
+      if (!slot) return res.status(404).json({ error: 'Slot not found' });
+      if (slot.status !== 'available') {
+        return res.status(400).json({ error: 'Photos can only be added to available sites' });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: 'No photo file provided' });
+      }
+
+      deleteUploadedImage(slot.imageUrl);
+      const updated = updateSlot(req.params.id, { imageUrl: `/uploads/sites/${req.file.filename}` });
+      res.json(updated);
+    });
+  });
+
+  app.delete('/api/slots/:id/photo', (req, res) => {
+    const slots = getSlots();
+    const slot = slots.find(s => s.id === req.params.id);
+    if (!slot) return res.status(404).json({ error: 'Slot not found' });
+
+    deleteUploadedImage(slot.imageUrl);
+    const updated = updateSlot(req.params.id, { imageUrl: undefined });
+    res.json(updated);
+  });
+
+  app.post('/api/bookings', (req, res) => {
+    const {
+      slotId,
+      rentalType = 'monthly',
+      checkIn,
+      checkOut,
+      contactName,
+      contactPhone,
+      contactEmail,
+      contactRvType,
+      contactLicensePlate,
+      contactEmergency,
+      contactNotes,
+      paymentMethod,
+    } = req.body;
+
+    const name = (contactName || '').trim();
+    if (!name) return res.status(400).json({ error: 'Contact name is required' });
+    if (!slotId) return res.status(400).json({ error: 'Site is required' });
+    if (!checkIn || !checkOut) return res.status(400).json({ error: 'Check-in and check-out dates are required' });
+
+    const slots = getSlots();
+    const slot = slots.find(s => s.id === slotId);
+    if (!slot) return res.status(404).json({ error: 'Site not found' });
+    if (slot.status !== 'available') {
+      return res.status(400).json({ error: 'This site is no longer available' });
+    }
+
+    const checkInDate = parseDateKey(checkIn);
+    const checkOutDate = parseDateKey(checkOut);
+    if (checkOutDate <= checkInDate) {
+      return res.status(400).json({ error: 'Check-out must be after check-in' });
+    }
+
+    const total = calculateStayTotal(rentalType, checkInDate, checkOutDate);
+    if (total <= 0) return res.status(400).json({ error: 'Invalid stay dates' });
+
+    upsertCustomer({
+      name,
+      phone: contactPhone,
+      email: contactEmail,
+      rvType: contactRvType,
+      licensePlate: contactLicensePlate,
+      emergencyContact: contactEmergency,
+      notes: contactNotes,
+    });
+
+    const updated = updateSlot(slotId, {
+      status: 'reserved',
+      contactName: name,
+      contactPhone: contactPhone || '',
+      contactEmail: contactEmail || '',
+      contactRvType: contactRvType || '',
+      contactLicensePlate: contactLicensePlate || '',
+      contactEmergency: contactEmergency || '',
+      contactNotes: contactNotes || '',
+      rentalType,
+      rentAmount: total,
+      balanceDue: 0,
+      startDate: checkIn,
+      endDate: checkOut,
+      paymentMethod: paymentMethod || 'Card',
+      bookedAt: new Date().toISOString().split('T')[0],
+      notes: `Booked online via ${paymentMethod || 'Card'}`,
+    });
+
+    res.status(201).json({
+      success: true,
+      slot: maintainSlots().find(s => s.id === slotId) ?? updated,
+      total,
+      paymentMethod: paymentMethod || 'Card',
+      checkIn,
+      checkOut,
+    });
   });
 
   app.post('/api/slots/:id/add-tenant', (req, res) => {
@@ -291,7 +655,7 @@ Keep responses concise, friendly, and helpful. You can move tenants and manage p
 The park has ${TOTAL_SLOTS} total sites. ${getAvailableCount()} are currently available.
 Current tenants: ${JSON.stringify(tenants)}
 Current site slots: ${JSON.stringify(slots)}
-Current photos: ${JSON.stringify(photos)}
+Current photos: ${JSON.stringify(getPhotos())}
 `;
 
       const moveTenantTool = {
