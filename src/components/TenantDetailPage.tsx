@@ -3,6 +3,8 @@ import {
   ArrowLeft, MapPin, Phone, Mail, Truck, CreditCard, User, FileText, Save, CheckCircle2, Trash2, Home
 } from 'lucide-react';
 import { RentalType, Slot, Tenant } from '../../types';
+import { ALL_RENTAL_TYPES } from '../../rentUtils';
+import { fetchActiveRates } from '../lib/activeRates';
 import { ReceiptLink } from './ReceiptLink';
 
 interface TenantDetailPageProps {
@@ -83,6 +85,7 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
   const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [error, setError] = useState('');
+  const [allowedRentalTypes, setAllowedRentalTypes] = useState<RentalType[]>([...ALL_RENTAL_TYPES]);
 
   useEffect(() => {
     setForm(formFromTenant(tenant));
@@ -90,6 +93,10 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
     setError('');
     setConfirmRemove(false);
   }, [tenant.id, tenant.name, tenant.site, tenant.phone, tenant.email, tenant.rvType, tenant.licensePlate, tenant.emergencyContact, tenant.notes, tenant.description, tenant.startDate, tenant.endDate, tenant.status, tenant.rentalType]);
+
+  useEffect(() => {
+    fetchActiveRates().then(active => setAllowedRentalTypes(active.allowedRentalTypes));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -238,9 +245,15 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
                       onChange={e => update('rentalType', e.target.value)}
                       className="px-3 py-2 rounded-xl bg-[#FBF9F7] border border-[#F0EBE6] text-sm text-[#5A6355] focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
                     >
-                      <option value="monthly">Monthly</option>
-                      <option value="weekly">Weekly</option>
-                      <option value="daily">Daily</option>
+                      {allowedRentalTypes.includes('monthly') && (
+                        <option value="monthly">Monthly</option>
+                      )}
+                      {allowedRentalTypes.includes('weekly') && (
+                        <option value="weekly">Weekly</option>
+                      )}
+                      {allowedRentalTypes.includes('daily') && (
+                        <option value="daily">Daily</option>
+                      )}
                     </select>
                   </div>
                   <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#E8F0E8] border border-[#A8B2A6] text-sm text-[#3D5A3D] capitalize">

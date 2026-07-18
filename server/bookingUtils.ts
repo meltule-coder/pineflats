@@ -1,5 +1,6 @@
 import { Slot, RentalType } from '../types';
-import { calculateStayTotal, parseDateKey } from '../rentUtils';
+import { allowsRentalType, calculateStayTotal, parseDateKey } from '../rentUtils';
+import { getActiveProperty, getActiveRentalRates } from './propertiesStore';
 
 export interface BookingRequestBody {
   slotId?: string;
@@ -47,13 +48,22 @@ export function parseBookingRequest(
   if (!slotId) return { ok: false, error: 'Site is required' };
   if (!checkIn || !checkOut) return { ok: false, error: 'Check-in and check-out dates are required' };
 
+  const activeProperty = getActiveProperty();
+  if (!allowsRentalType(activeProperty, rentalType)) {
+    return {
+      ok: false,
+      error: `${rentalType} stays are not offered for ${activeProperty?.name ?? 'this property'}`,
+    };
+  }
+
   const checkInDate = parseDateKey(checkIn);
   const checkOutDate = parseDateKey(checkOut);
   if (checkOutDate <= checkInDate) {
     return { ok: false, error: 'Check-out must be after check-in' };
   }
 
-  const total = calculateStayTotal(rentalType, checkInDate, checkOutDate);
+  const rates = getActiveRentalRates();
+  const total = calculateStayTotal(rentalType, checkInDate, checkOutDate, rates);
   if (total <= 0) return { ok: false, error: 'Invalid stay dates' };
 
   return {

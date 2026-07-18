@@ -11,15 +11,19 @@ import { PhotosWidget } from './components/PhotosWidget';
 import { ContactWidget } from './components/ContactWidget';
 import { CustomersWidget } from './components/CustomersWidget';
 import { WebsitePreviewWidget } from './components/WebsitePreviewWidget';
+import { CommentsAdminWidget } from './components/CommentsAdminWidget';
+import { PropertiesWidget } from './components/PropertiesWidget';
 import { TenantDetailPage } from './components/TenantDetailPage';
 import { TenantPaymentPage } from './components/TenantPaymentPage';
 import { TenantReceiptPage } from './components/TenantReceiptPage';
 import { AddTenantWidget } from './components/AddTenantWidget';
-import { Users, Image as ImageIcon, Search, Sparkles, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign, Settings } from 'lucide-react';
+import { Users, Image as ImageIcon, Search, Sparkles, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign, Settings, Building2 } from 'lucide-react';
 import { Tenant, Photo } from '../types';
 
+type AppTab = 'tenants' | 'sites' | 'photos' | 'marketing' | 'calendar' | 'properties' | 'settings';
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'tenants' | 'sites' | 'photos' | 'marketing' | 'calendar' | 'settings'>('tenants');
+  const [activeTab, setActiveTab] = useState<AppTab>('tenants');
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
@@ -43,7 +47,7 @@ export default function App() {
   useEffect(() => {
     loadData();
     const tab = new URLSearchParams(window.location.search).get('tab');
-    if (tab === 'sites' || tab === 'tenants' || tab === 'photos' || tab === 'marketing' || tab === 'calendar' || tab === 'settings') {
+    if (tab === 'sites' || tab === 'tenants' || tab === 'photos' || tab === 'marketing' || tab === 'calendar' || tab === 'properties' || tab === 'settings') {
       setActiveTab(tab);
     }
   }, []);
@@ -138,6 +142,17 @@ export default function App() {
           >
             <CalendarIcon className="w-4 h-4" />
             Bookings
+          </button>
+          <button
+            onClick={() => setActiveTab('properties')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+              activeTab === 'properties'
+                ? 'bg-[#5A6355] text-white rounded-2xl'
+                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
+            }`}
+          >
+            <Building2 className="w-4 h-4" />
+            Properties
           </button>
           <button
             onClick={() => setActiveTab('settings')}
@@ -351,9 +366,14 @@ export default function App() {
           </div>
         )}
 
+        {activeTab === 'properties' && (
+          <PropertiesWidget />
+        )}
+
         {activeTab === 'settings' && (
           <div className="space-y-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
             <WebsitePreviewWidget />
+            <CommentsAdminWidget />
             <ContactWidget onUpdate={loadData} />
           </div>
         )}

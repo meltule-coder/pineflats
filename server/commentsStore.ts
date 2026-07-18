@@ -56,3 +56,43 @@ export function addComment(data: {
   saveComments(comments);
   return entry;
 }
+
+export function setAdminReply(
+  id: string,
+  data: { reply: string; adminName?: string }
+): CustomerComment | null {
+  const comments = getComments();
+  const index = comments.findIndex(c => c.id === id);
+  if (index === -1) return null;
+
+  const reply = data.reply.trim().slice(0, 1000);
+  if (!reply) return null;
+
+  comments[index] = {
+    ...comments[index],
+    adminReply: reply,
+    adminReplyName: (data.adminName || 'Pine Flats').trim().slice(0, 80) || 'Pine Flats',
+    adminReplyAt: new Date().toISOString(),
+  };
+  saveComments(comments);
+  return comments[index];
+}
+
+export function clearAdminReply(id: string): CustomerComment | null {
+  const comments = getComments();
+  const index = comments.findIndex(c => c.id === id);
+  if (index === -1) return null;
+
+  const { adminReply: _a, adminReplyName: _b, adminReplyAt: _c, ...rest } = comments[index];
+  comments[index] = rest as CustomerComment;
+  saveComments(comments);
+  return comments[index];
+}
+
+export function deleteComment(id: string): boolean {
+  const comments = getComments();
+  const next = comments.filter(c => c.id !== id);
+  if (next.length === comments.length) return false;
+  saveComments(next);
+  return true;
+}

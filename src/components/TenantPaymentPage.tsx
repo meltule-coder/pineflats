@@ -5,8 +5,11 @@ import {
 } from 'lucide-react';
 import { Tenant, TenantPayment, MeterRecord, ExtraCharge, PaymentCredit, SavedPaymentCard } from '../../types';
 import {
-  dailyRateLabel, formatDailyRateDescription, MONTHLY_RENT, rentAmountForType, prorateMonthlyRent,
+  DEFAULT_RENTAL_RATES,
+  dailyRateLabel, formatDailyRateDescription, rentAmountForType, prorateMonthlyRent,
+  type RentalRatesConfig,
 } from '../../rentUtils';
+import { fetchActiveRates } from '../lib/activeRates';
 import { ReceiptLink } from './ReceiptLink';
 
 interface TenantPaymentPageProps {
@@ -84,15 +87,16 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     description: '',
     note: '',
   });
+  const [rates, setRates] = useState<RentalRatesConfig>(DEFAULT_RENTAL_RATES);
 
-  const loadPayment = async () => {
+  const loadPayment = async (activeRates: RentalRatesConfig = rates) => {
     const res = await fetch(`/api/tenants/${tenant.id}/payments`);
     if (res.ok) {
       const data: TenantPayment = await res.json();
       setPayment(data);
       const rentalType = data.rentalType ?? tenant.rentalType;
       if (rentalType === 'daily') {
-        const resolvedRent = rentAmountForType('daily');
+        const resolvedRent = rentAmountForType('daily', new Date(), activeRates);
         setRentAmount(String(resolvedRent));
         if (resolvedRent !== data.rentAmount) {
           await fetch(`/api/tenants/${tenant.id}/payments`, {
@@ -103,7 +107,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
         }
       } else if (rentalType === 'monthly') {
         // Editor shows full monthly rate; period rent is computed separately
-        setRentAmount(String(data.baseMonthlyRate ?? MONTHLY_RENT));
+        setRentAmount(String(data.baseMonthlyRate ?? activeRates.monthly));
         // Only load user-saved charge dates (not auto-computed window dates)
         setRentChargeStart(data.rentChargeStart || '');
         setRentChargeEnd(data.rentChargeEnd || '');
@@ -120,7 +124,14 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
   };
 
   useEffect(() => {
-    loadPayment();
+    let cancelled = false;
+    (async () => {
+      const activeRates = await fetchActiveRates();
+      if (cancelled) return;
+      setRates(activeRates);
+      await loadPayment(activeRates);
+    })();
+    return () => { cancelled = true; };
   }, [tenant.id]);
 
   useEffect(() => {
@@ -139,7 +150,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     (parseFloat(currentReadingTotal) || 0) - (parseFloat(baselineCredit) || 0)
   );
   const netElectricCharge = netReadingTotal * KWH_RATE;
-  const baseMonthlyRate = parseFloat(rentAmount) || MONTHLY_RENT;
+  const baseMonthlyRate = parseFloat(rentAmount) || rates.monthly;
   const rentalType = payment?.rentalType ?? tenant.rentalType;
   const billingPeriod = payment?.billingPeriod ?? '';
 
@@ -201,7 +212,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
         previousMeterReading: parseFloat(previousMeterReading) || 0,
       };
       if (rentalType === 'monthly') {
-        body.baseMonthlyRate = parseFloat(rentAmount) || MONTHLY_RENT;
+        body.baseMonthlyRate = parseFloat(rentAmount) || rates.monthly;
         body.rentChargeStart = rentChargeStart || null;
         body.rentChargeEnd = rentChargeEnd || null;
       } else {
@@ -850,7 +861,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
           )}
           {rentalType === 'daily' && (
             <p className="text-xs text-[#5A6355] mt-2">
-              Daily: {formatDailyRateDescription()} · Today ({dailyRateLabel()}): {formatCurrency(rentAmountForType('daily'))}
+              Daily: {formatDailyRateDescription(rates)} · Today ({dailyRateLabel()}): {formatCurrency(rentAmountForType('daily', new Date(), rates))}
             </p>
           )}
         </div>

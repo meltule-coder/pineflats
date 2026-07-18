@@ -43,12 +43,17 @@ import {
   getCustomers, addCustomer, updateCustomer, deleteCustomer, upsertCustomer
 } from './server/customersStore';
 import { getPublicAvailability, getPublicSiteBundle } from './server/publicData';
-import { getComments, addComment } from './server/commentsStore';
+import { getComments, addComment, setAdminReply, clearAdminReply, deleteComment } from './server/commentsStore';
+import {
+  getProperties, getProperty, getActiveProperty, addProperty, updateProperty, deleteProperty,
+  setActiveProperty, updatePropertyRentalRates, getActiveRatesPayload
+} from './server/propertiesStore';
 import { SLOT_CONTACT_CLEAR, clearSlotContactFields } from './server/slotContactUtils';
 import { verifyPreviewPassword, setPreviewPassword, getPreviewPassword } from './server/previewStore';
 import {
   parseBookingRequest, canBookSlot, buildSlotBookingUpdates, ParsedBooking
 } from './server/bookingUtils';
+import { sendBookingReceiptEmails, getEmailConfigStatus } from './server/emailService';
 
 // Initialize Gemini API
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -125,6 +130,72 @@ async function startServer() {
   // Health check
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok' });
+  });
+
+  // --- Properties (multi-park registry) ---
+  app.get('/api/properties', (_req, res) => {
+    res.json(getProperties());
+  });
+
+  app.get('/api/properties/active', (_req, res) => {
+    const active = getActiveProperty();
+    if (!active) return res.status(404).json({ error: 'No properties found' });
+    res.json(active);
+  });
+
+  app.get('/api/properties/:id', (req, res) => {
+    const property = getProperty(req.params.id);
+    if (!property) return res.status(404).json({ error: 'Property not found' });
+    res.json(property);
+  });
+
+  app.post('/api/properties', (req, res) => {
+    try {
+      const property = addProperty(req.body || {});
+      res.status(201).json(property);
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : 'Failed to add property' });
+    }
+  });
+
+  app.put('/api/properties/:id', (req, res) => {
+    const updated = updateProperty(req.params.id, req.body || {});
+    if (!updated) return res.status(404).json({ error: 'Property not found or invalid data' });
+    res.json(updated);
+  });
+
+  app.post('/api/properties/:id/activate', (req, res) => {
+    const updated = setActiveProperty(req.params.id);
+    if (!updated) return res.status(404).json({ error: 'Property not found' });
+    res.json(updated);
+  });
+
+  app.get('/api/rates/active', (_req, res) => {
+    res.json(getActiveRatesPayload());
+  });
+
+  app.put('/api/properties/:id/rates', (req, res) => {
+    const property = getProperty(req.params.id);
+    if (!property) return res.status(404).json({ error: 'Property not found' });
+    if (!property.isActive) {
+      return res.status(400).json({
+        error: 'Set this property as active before editing rental rates',
+      });
+    }
+    const updated = updatePropertyRentalRates(req.params.id, req.body || {});
+    if (!updated) return res.status(400).json({ error: 'Could not save rental rates' });
+    res.json(updated);
+  });
+
+  app.delete('/api/properties/:id', (req, res) => {
+    try {
+      if (!deleteProperty(req.params.id)) {
+        return res.status(404).json({ error: 'Property not found' });
+      }
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : 'Failed to delete property' });
+    }
   });
 
   // --- Public website APIs (no tenant/customer/returning-guest PII) ---
@@ -739,6 +810,41 @@ async function startServer() {
     res.status(201).json(addComment({ name, comment, rating }));
   });
 
+  app.put('/api/comments/:id/reply', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Admin replies are not available from the public website' });
+    }
+    const { reply, adminName } = req.body || {};
+    if (!reply || typeof reply !== 'string' || !reply.trim()) {
+      return res.status(400).json({ error: 'Reply text is required' });
+    }
+    const updated = setAdminReply(req.params.id, {
+      reply,
+      adminName: typeof adminName === 'string' ? adminName : undefined,
+    });
+    if (!updated) return res.status(404).json({ error: 'Comment not found or reply empty' });
+    res.json(updated);
+  });
+
+  app.delete('/api/comments/:id/reply', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Admin replies are not available from the public website' });
+    }
+    const updated = clearAdminReply(req.params.id);
+    if (!updated) return res.status(404).json({ error: 'Comment not found' });
+    res.json(updated);
+  });
+
+  app.delete('/api/comments/:id', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Not allowed from the public website' });
+    }
+    if (!deleteComment(req.params.id)) {
+      return res.status(404).json({ error: 'Comment not found' });
+    }
+    res.json({ ok: true });
+  });
+
   app.get('/api/photos', (req, res) => {
     if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
       return res.json(getPublishedPhotos());
@@ -846,6 +952,26 @@ async function startServer() {
       Object.assign(updates, clearSlotContactFields({}));
     }
 
+    if (updates.status === 'maintenance') {
+      // Keep maintenance note; clear reservation window so site is not treated as booked
+      if (updates.notes === undefined && typeof req.body.notes === 'string') {
+        updates.notes = req.body.notes;
+      }
+      updates.startDate = undefined;
+      updates.endDate = undefined;
+      updates.bookedAt = undefined;
+      updates.paymentMethod = undefined;
+    }
+
+    if (updates.status === 'reserved') {
+      // Ensure reserved stays have dates when provided
+      if (updates.startDate === '') updates.startDate = undefined;
+      if (updates.endDate === '') updates.endDate = undefined;
+    }
+
+    // Allow clearing notes with empty string
+    if (updates.notes === '') updates.notes = undefined;
+
     const updated = updateSlot(req.params.id, updates);
     res.json(updated);
   });
@@ -933,7 +1059,7 @@ async function startServer() {
     res.json(updated);
   });
 
-  function saveBookingToSlot(parsed: ParsedBooking, paid: boolean) {
+  async function saveBookingToSlot(parsed: ParsedBooking, paid: boolean) {
     // Returning-customer store is back-office only; still upsert for managers
     upsertCustomer({
       name: parsed.name,
@@ -961,7 +1087,11 @@ async function startServer() {
     };
   }
 
-  app.post('/api/bookings/start', (req, res) => {
+  app.get('/api/email/status', (_req, res) => {
+    res.json(getEmailConfigStatus());
+  });
+
+  app.post('/api/bookings/start', async (req, res) => {
     const parsed = parseBookingRequest(req.body);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
 
@@ -971,11 +1101,11 @@ async function startServer() {
     const slotError = canBookSlot(slot, parsed.data.email, true);
     if (slotError) return res.status(400).json({ error: slotError });
 
-    const result = saveBookingToSlot(parsed.data, false);
+    const result = await saveBookingToSlot(parsed.data, false);
     res.status(201).json(result);
   });
 
-  app.post('/api/bookings', (req, res) => {
+  app.post('/api/bookings', async (req, res) => {
     const parsed = parseBookingRequest(req.body);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
 
@@ -985,8 +1115,33 @@ async function startServer() {
     const slotError = canBookSlot(slot, parsed.data.email, true);
     if (slotError) return res.status(400).json({ error: slotError });
 
-    const result = saveBookingToSlot(parsed.data, true);
-    res.status(201).json(result);
+    const result = await saveBookingToSlot(parsed.data, true);
+
+    // Automatic receipt emails: guest + Pine Flats (non-blocking for booking success)
+    let email: Awaited<ReturnType<typeof sendBookingReceiptEmails>> | null = null;
+    try {
+      email = await sendBookingReceiptEmails({
+        booking: parsed.data,
+        siteLabel: result.siteLabel,
+        siteNumber: result.siteNumber,
+        paid: true,
+      });
+    } catch (err) {
+      console.error('Booking receipt email failed:', err);
+    }
+
+    res.status(201).json({
+      ...result,
+      emailSent: !!(email?.customerSent || email?.parkSent),
+      email: email
+        ? {
+            customerSent: email.customerSent,
+            parkSent: email.parkSent,
+            mode: email.mode,
+            error: email.error,
+          }
+        : { customerSent: false, parkSent: false, mode: 'log' as const, error: 'Email service error' },
+    });
   });
 
   app.post('/api/slots/:id/remove-tenant', (req, res) => {

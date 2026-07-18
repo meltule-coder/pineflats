@@ -1,22 +1,30 @@
 import { useEffect, useState } from 'react';
 import { Plus, Save, UserPlus, X } from 'lucide-react';
 import { RentalType, Slot } from '../../types';
-import { rentAmountForType } from '../../rentUtils';
+import {
+  ALL_RENTAL_TYPES,
+  DEFAULT_RENTAL_RATES,
+  rentAmountForType,
+  type RentalRatesConfig,
+} from '../../rentUtils';
+import { fetchActiveRates, type ActiveRates } from '../lib/activeRates';
 
-const EMPTY = {
-  name: '',
-  site: '',
-  phone: '',
-  email: '',
-  rvType: '',
-  licensePlate: '',
-  emergencyContact: '',
-  notes: '',
-  startDate: new Date().toISOString().split('T')[0],
-  endDate: 'ongoing',
-  rentalType: 'monthly' as RentalType,
-  rentAmount: String(rentAmountForType('monthly')),
-};
+function emptyForm(rates: RentalRatesConfig = DEFAULT_RENTAL_RATES) {
+  return {
+    name: '',
+    site: '',
+    phone: '',
+    email: '',
+    rvType: '',
+    licensePlate: '',
+    emergencyContact: '',
+    notes: '',
+    startDate: new Date().toISOString().split('T')[0],
+    endDate: 'ongoing',
+    rentalType: 'monthly' as RentalType,
+    rentAmount: String(rentAmountForType('monthly', new Date(), rates)),
+  };
+}
 
 interface AddTenantWidgetProps {
   onAdded: (tenant?: { id: string }) => void | Promise<void>;
@@ -24,7 +32,11 @@ interface AddTenantWidgetProps {
 
 export function AddTenantWidget({ onAdded }: AddTenantWidgetProps) {
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState(EMPTY);
+  const [form, setForm] = useState(() => emptyForm());
+  const [rates, setRates] = useState<ActiveRates>({
+    ...DEFAULT_RENTAL_RATES,
+    allowedRentalTypes: [...ALL_RENTAL_TYPES],
+  });
   const [availableSites, setAvailableSites] = useState<Slot[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
@@ -47,15 +59,25 @@ export function AddTenantWidget({ onAdded }: AddTenantWidgetProps) {
   };
 
   useEffect(() => {
-    if (open) loadAvailableSites();
+    if (!open) return;
+    loadAvailableSites();
+    fetchActiveRates().then(active => {
+      setRates(active);
+      setForm(prev => {
+        const rentalType = active.allowedRentalTypes.includes(prev.rentalType)
+          ? prev.rentalType
+          : (active.allowedRentalTypes[0] ?? 'monthly');
+        return {
+          ...prev,
+          rentalType,
+          rentAmount: String(rentAmountForType(rentalType, new Date(), active)),
+        };
+      });
+    });
   }, [open]);
 
   const reset = () => {
-    setForm({
-      ...EMPTY,
-      startDate: new Date().toISOString().split('T')[0],
-      rentAmount: String(rentAmountForType('monthly')),
-    });
+    setForm(emptyForm(rates));
     setError('');
     setOpen(false);
   };
@@ -64,7 +86,7 @@ export function AddTenantWidget({ onAdded }: AddTenantWidgetProps) {
     setForm((p) => ({
       ...p,
       rentalType,
-      rentAmount: String(rentAmountForType(rentalType)),
+      rentAmount: String(rentAmountForType(rentalType, new Date(), rates)),
     }));
   };
 
@@ -177,9 +199,15 @@ export function AddTenantWidget({ onAdded }: AddTenantWidgetProps) {
                 onChange={(e) => setRentalType(e.target.value as RentalType)}
                 className="px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
               >
-                <option value="monthly">Monthly</option>
-                <option value="weekly">Weekly</option>
-                <option value="daily">Daily</option>
+                {rates.allowedRentalTypes.includes('monthly') && (
+                  <option value="monthly">Monthly</option>
+                )}
+                {rates.allowedRentalTypes.includes('weekly') && (
+                  <option value="weekly">Weekly</option>
+                )}
+                {rates.allowedRentalTypes.includes('daily') && (
+                  <option value="daily">Daily</option>
+                )}
               </select>
 
               <input

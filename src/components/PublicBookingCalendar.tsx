@@ -2,7 +2,9 @@ import { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, CalendarDays } from 'lucide-react';
 import { RentalType } from '../../types';
 import {
-  rentAmountForType, calculateStayTotal, parseDateKey
+  DEFAULT_RENTAL_RATES,
+  rentAmountForType, calculateStayTotal, parseDateKey,
+  type RentalRatesConfig,
 } from '../../rentUtils';
 
 function formatCurrency(amount: number) {
@@ -29,6 +31,7 @@ interface PublicBookingCalendarProps {
   selectedSiteLabel?: string | null;
   checkIn: string | null;
   checkOut: string | null;
+  rates?: RentalRatesConfig;
   onDatesChange: (checkIn: string | null, checkOut: string | null) => void;
 }
 
@@ -38,6 +41,7 @@ export function PublicBookingCalendar({
   selectedSiteLabel,
   checkIn,
   checkOut,
+  rates = DEFAULT_RENTAL_RATES,
   onDatesChange,
 }: PublicBookingCalendarProps) {
   const today = new Date();
@@ -63,7 +67,7 @@ export function PublicBookingCalendar({
   const checkOutDate = checkOut ? parseDateKey(checkOut) : null;
 
   const estimatedTotal = selectedRental && checkInDate && checkOutDate && checkOutDate > checkInDate
-    ? calculateStayTotal(selectedRental, checkInDate, checkOutDate)
+    ? calculateStayTotal(selectedRental, checkInDate, checkOutDate, rates)
     : null;
 
   const nights = checkInDate && checkOutDate && checkOutDate > checkInDate
@@ -195,7 +199,7 @@ export function PublicBookingCalendar({
             {estimatedTotal != null
               ? `${formatCurrency(estimatedTotal)} · ${nights} night${nights === 1 ? '' : 's'}`
               : selectedRental
-                ? formatCurrency(rentAmountForType(selectedRental))
+                ? formatCurrency(rentAmountForType(selectedRental, new Date(), rates))
                 : 'Choose rental type'}
           </p>
         </div>

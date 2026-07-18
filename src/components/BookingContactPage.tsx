@@ -1,7 +1,11 @@
 import { useState, type ElementType } from 'react';
 import { ArrowLeft, User, Phone, Mail, Truck, CreditCard, FileText, ArrowRight } from 'lucide-react';
 import { BookingContactInfo, RentalType } from '../../types';
-import { calculateStayNights, calculateStayTotal, parseDateKey } from '../../rentUtils';
+import {
+  DEFAULT_RENTAL_RATES,
+  calculateStayNights, calculateStayTotal, parseDateKey,
+  type RentalRatesConfig,
+} from '../../rentUtils';
 
 function formatCurrency(amount: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
@@ -62,6 +66,7 @@ interface BookingContactPageProps {
   rentalType: RentalType;
   checkIn: string;
   checkOut: string;
+  rates?: RentalRatesConfig;
   onBack: () => void;
   onContinue: (contact: BookingContactInfo) => void;
 }
@@ -73,6 +78,7 @@ export function BookingContactPage({
   rentalType,
   checkIn,
   checkOut,
+  rates = DEFAULT_RENTAL_RATES,
   onBack,
   onContinue,
 }: BookingContactPageProps) {
@@ -91,7 +97,7 @@ export function BookingContactPage({
   const checkInDate = parseDateKey(checkIn);
   const checkOutDate = parseDateKey(checkOut);
   const nights = calculateStayNights(checkInDate, checkOutDate);
-  const total = calculateStayTotal(rentalType, checkInDate, checkOutDate);
+  const total = calculateStayTotal(rentalType, checkInDate, checkOutDate, rates);
 
   const update = (key: keyof BookingContactInfo, value: string) => {
     setForm(prev => ({ ...prev, [key]: value }));

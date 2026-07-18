@@ -5,8 +5,9 @@ import {
   TenantPayment, PaymentRecord, MeterRecord, ExtraCharge, PaymentCredit, RentalType,
   SavedPaymentCard, StoredPaymentCard
 } from '../types';
-import { MONTHLY_RENT, rentAmountForType, prorateMonthlyRent } from '../rentUtils';
+import { rentAmountForType, prorateMonthlyRent } from '../rentUtils';
 import { getTenant } from './tenantsStore';
+import { getActiveRentalRates } from './propertiesStore';
 import {
   encryptSensitive, decryptSensitive, sanitizeToLast4, detectCardBrandFromLast4Only
 } from './cardSecurity';
@@ -90,10 +91,11 @@ function applyMonthlyProration(tenantId: string, payment: TenantPayment): Tenant
   }
 
   const tenant = getTenant(tenantId);
+  const activeRates = getActiveRentalRates();
   const baseMonthlyRate =
     payment.baseMonthlyRate
     ?? (payment as TenantPayment & { monthlyRate?: number }).monthlyRate
-    ?? MONTHLY_RENT;
+    ?? activeRates.monthly;
 
   // Current billing window (YYYY-MM) — not the tenant's original move-in month
   const period =
@@ -171,8 +173,8 @@ function defaultPayment(tenantId: string): TenantPayment {
   const base: TenantPayment = {
     tenantId,
     rentalType,
-    rentAmount: rentAmountForType(rentalType),
-    baseMonthlyRate: rentalType === 'monthly' ? MONTHLY_RENT : undefined,
+    rentAmount: rentAmountForType(rentalType, new Date(), getActiveRentalRates()),
+    baseMonthlyRate: rentalType === 'monthly' ? getActiveRentalRates().monthly : undefined,
     currentReadingTotal: 0,
     baselineCredit: 0,
     balanceDue: 0,
@@ -477,7 +479,7 @@ function resolveRentAmount(payment: TenantPayment & { monthlyRate?: number }, te
     // Prefer already-prorated rentAmount after applyMonthlyProration
     if (payment.rentAmount != null && payment.rentProration) return payment.rentAmount;
     const tenant = getTenant(tenantId);
-    const base = payment.baseMonthlyRate ?? payment.monthlyRate ?? MONTHLY_RENT;
+    const base = payment.baseMonthlyRate ?? payment.monthlyRate ?? getActiveRentalRates().monthly;
     const userStart = payment.rentChargeStart || undefined;
     const userEnd = payment.rentChargeEnd || undefined;
     return prorateMonthlyRent({
@@ -608,7 +610,7 @@ export function startNewBillingPeriod(
     ...payment,
     tenantId,
     rentalType,
-    baseMonthlyRate: payment.baseMonthlyRate ?? (rentalType === 'monthly' ? MONTHLY_RENT : payment.baseMonthlyRate),
+    baseMonthlyRate: payment.baseMonthlyRate ?? (rentalType === 'monthly' ? getActiveRentalRates().monthly : payment.baseMonthlyRate),
     billingPeriod: nextPeriod,
     carriedBalance,
     paymentBaseline: allPaid,
@@ -684,7 +686,12 @@ export function getTenantPayment(tenantId: string): TenantPayment {
     rentalType,
     baseMonthlyRate:
       synced.baseMonthlyRate
-      ?? (rentalType === 'monthly' ? (synced.rentAmount && synced.rentAmount >= MONTHLY_RENT ? synced.rentAmount : MONTHLY_RENT) : undefined),
+      ?? (rentalType === 'monthly'
+        ? (() => {
+            const monthly = getActiveRentalRates().monthly;
+            return synced.rentAmount && synced.rentAmount >= monthly ? synced.rentAmount : monthly;
+          })()
+        : undefined),
     currentReadingTotal: resolveCurrentReadingTotal(synced),
     baselineCredit: synced.baselineCredit ?? 0,
     previousMeterReading: synced.previousMeterReading ?? 0,
@@ -748,7 +755,7 @@ export function updateTenantPayment(tenantId: string, updates: Partial<TenantPay
         ? Number(updateBaseRate)
         : updateRentAmount != null
           ? Number(updateRentAmount)
-          : (current.baseMonthlyRate ?? MONTHLY_RENT);
+          : (current.baseMonthlyRate ?? getActiveRentalRates().monthly);
     merged.baseMonthlyRate = nextBase;
     if (updateChargeStart !== undefined) {
       merged.rentChargeStart = updateChargeStart ? String(updateChargeStart) : undefined;

@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { ArrowLeft, CheckCircle2, CreditCard, Loader2 } from 'lucide-react';
 import { BookingContactInfo, RentalType } from '../../types';
-import { calculateStayNights, calculateStayTotal, parseDateKey } from '../../rentUtils';
+import {
+  DEFAULT_RENTAL_RATES,
+  calculateStayNights, calculateStayTotal, parseDateKey,
+  type RentalRatesConfig,
+} from '../../rentUtils';
 
 function formatCurrency(amount: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
@@ -17,8 +21,9 @@ interface BookingPaymentPageProps {
   checkIn: string;
   checkOut: string;
   contact: BookingContactInfo;
+  rates?: RentalRatesConfig;
   onBack: () => void;
-  onComplete: () => void;
+  onComplete: (result?: { emailSent?: boolean }) => void;
 }
 
 export function BookingPaymentPage({
@@ -29,6 +34,7 @@ export function BookingPaymentPage({
   checkIn,
   checkOut,
   contact,
+  rates = DEFAULT_RENTAL_RATES,
   onBack,
   onComplete,
 }: BookingPaymentPageProps) {
@@ -39,7 +45,7 @@ export function BookingPaymentPage({
   const checkInDate = parseDateKey(checkIn);
   const checkOutDate = parseDateKey(checkOut);
   const nights = calculateStayNights(checkInDate, checkOutDate);
-  const total = calculateStayTotal(rentalType, checkInDate, checkOutDate);
+  const total = calculateStayTotal(rentalType, checkInDate, checkOutDate, rates);
 
   const handlePay = async () => {
     setIsSubmitting(true);
@@ -58,7 +64,8 @@ export function BookingPaymentPage({
         }),
       });
       if (res.ok) {
-        onComplete();
+        const data = await res.json().catch(() => ({}));
+        onComplete({ emailSent: !!data.emailSent });
       } else {
         const data = await res.json().catch(() => ({}));
         setError(data.error || 'Payment could not be completed. Please try again.');

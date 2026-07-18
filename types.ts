@@ -1,6 +1,42 @@
 export type SlotStatus = 'available' | 'occupied' | 'reserved' | 'maintenance';
 export type RentalType = 'weekly' | 'monthly' | 'daily';
 
+/** Rental rates for a property (used when that property is active) */
+export interface PropertyRentalRates {
+  monthly: number;
+  weekly: number;
+  dailyWeekday: number;
+  dailyWeekend: number;
+  /** Optional notes about rates, deposits, or stay rules */
+  notes?: string;
+}
+
+/** A managed park / property location */
+export interface Property {
+  id: string;
+  name: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  phone?: string;
+  email?: string;
+  totalSites?: number;
+  notes?: string;
+  /** Rates charged when this property is active */
+  rentalRates?: PropertyRentalRates;
+  /**
+   * Which rental types this property offers.
+   * Default: daily, weekly, monthly.
+   * Big/Little House → monthly only; Tree house → daily only.
+   */
+  allowedRentalTypes?: RentalType[];
+  /** Active property is the one currently managed in the rest of the app */
+  isActive?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface Slot {
   id: string;
   number: number;
@@ -221,6 +257,10 @@ export interface CustomerComment {
   comment: string;
   rating?: number;
   createdAt: string;
+  /** Admin response shown under the guest comment on the website */
+  adminReply?: string;
+  adminReplyName?: string;
+  adminReplyAt?: string;
 }
 
 export interface ChatMessage {

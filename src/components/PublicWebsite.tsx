@@ -9,9 +9,12 @@ import {
   MessageSquare, X, Send, Star
 } from 'lucide-react';
 import {
-  WEEKLY_RENT, MONTHLY_RENT, DAILY_RENT_WEEKDAY, DAILY_RENT_WEEKEND,
-  getDailyRentForDate, dailyRateLabel, formatDailyRateDescription
+  ALL_RENTAL_TYPES,
+  DEFAULT_RENTAL_RATES,
+  getDailyRentForDate, dailyRateLabel, formatDailyRateDescription,
+  type RentalRatesConfig,
 } from '../../rentUtils';
+import { fetchActiveRates, type ActiveRates } from '../lib/activeRates';
 import { PublicBookingCalendar } from './PublicBookingCalendar';
 import { BookingContactPage } from './BookingContactPage';
 import { BookingPaymentPage } from './BookingPaymentPage';
@@ -27,35 +30,32 @@ function parseDate(key: string) {
   return new Date(y, m - 1, d);
 }
 
-const RENTAL_OPTIONS: {
-  type: RentalType;
-  label: string;
-  price: string;
-  detail: string;
-  icon: typeof Sun;
-}[] = [
-  {
-    type: 'daily',
-    label: 'Daily',
-    price: formatDailyRateDescription(),
-    detail: `Today (${dailyRateLabel()}): ${formatCurrency(getDailyRentForDate())}`,
-    icon: Sun,
-  },
-  {
-    type: 'weekly',
-    label: 'Weekly',
-    price: formatCurrency(WEEKLY_RENT),
-    detail: 'Per week · prorated over 7 nights',
-    icon: Clock,
-  },
-  {
-    type: 'monthly',
-    label: 'Monthly',
-    price: formatCurrency(MONTHLY_RENT),
-    detail: 'Per month · $750; partial stays prorated by month length',
-    icon: Home,
-  },
-];
+function buildRentalOptions(rates: RentalRatesConfig, allowed: RentalType[] = [...ALL_RENTAL_TYPES]) {
+  const options = [
+    {
+      type: 'daily' as const,
+      label: 'Daily',
+      price: formatDailyRateDescription(rates),
+      detail: `Today (${dailyRateLabel()}): ${formatCurrency(getDailyRentForDate(new Date(), rates))}`,
+      icon: Sun,
+    },
+    {
+      type: 'weekly' as const,
+      label: 'Weekly',
+      price: formatCurrency(rates.weekly),
+      detail: 'Per week · prorated over 7 nights',
+      icon: Clock,
+    },
+    {
+      type: 'monthly' as const,
+      label: 'Monthly',
+      price: formatCurrency(rates.monthly),
+      detail: `Per month · ${formatCurrency(rates.monthly)}; partial stays prorated by month length`,
+      icon: Home,
+    },
+  ];
+  return options.filter(o => allowed.includes(o.type));
+}
 
 function phoneHref(phone: string) {
   const digits = phone.replace(/\D/g, '');
@@ -84,6 +84,7 @@ export function PublicWebsite({
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [bookingStep, setBookingStep] = useState<BookingStep>('browse');
   const [bookingContact, setBookingContact] = useState<BookingContactInfo | null>(null);
+  const [bookingEmailSent, setBookingEmailSent] = useState(false);
   const [contactInfo, setContactInfo] = useState<ParkContact>(contact);
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [comments, setComments] = useState<CustomerComment[]>([]);
@@ -93,6 +94,11 @@ export function PublicWebsite({
   const [commentSubmitting, setCommentSubmitting] = useState(false);
   const [commentError, setCommentError] = useState('');
   const [commentSuccess, setCommentSuccess] = useState(false);
+  const [rates, setRates] = useState<ActiveRates>({
+    ...DEFAULT_RENTAL_RATES,
+    allowedRentalTypes: [...ALL_RENTAL_TYPES],
+  });
+  const rentalOptions = buildRentalOptions(rates, rates.allowedRentalTypes);
   const imagePhotos = photos.filter(p => p.mediaType !== 'video');
   const galleryMedia = photos.filter(p => {
     // Hero uses first image; gallery shows remaining images + all videos
@@ -126,6 +132,13 @@ export function PublicWebsite({
         }
       })
       .catch(() => {});
+    fetchActiveRates().then(active => {
+      setRates(active);
+      setSelectedRental(prev => {
+        if (prev && active.allowedRentalTypes.includes(prev)) return prev;
+        return active.allowedRentalTypes.length === 1 ? active.allowedRentalTypes[0] : null;
+      });
+    });
     loadComments();
   }, []);
 
@@ -167,7 +180,7 @@ export function PublicWebsite({
     }
   };
 
-  const selectedOption = RENTAL_OPTIONS.find(o => o.type === selectedRental);
+  const selectedOption = rentalOptions.find(o => o.type === selectedRental);
   const selectedSite = availableSlots.find(s => s.id === selectedSiteId) ?? null;
   const canBook = !!selectedRental && !!checkIn && !!checkOut && !!selectedSiteId;
 
@@ -207,6 +220,7 @@ export function PublicWebsite({
         rentalType={selectedRental}
         checkIn={checkIn}
         checkOut={checkOut}
+        rates={rates}
         onBack={() => setBookingStep('browse')}
         onContinue={contact => {
           setBookingContact(contact);
@@ -227,8 +241,10 @@ export function PublicWebsite({
         checkIn={checkIn}
         checkOut={checkOut}
         contact={bookingContact}
+        rates={rates}
         onBack={() => setBookingStep('contact')}
-        onComplete={() => {
+        onComplete={(result) => {
+          setBookingEmailSent(!!result?.emailSent);
           setBookingStep('confirmed');
           setAvailableSlots(prev => prev.filter(s => s.id !== selectedSite.id));
           setAvailableSpots(n => Math.max(0, n - 1));
@@ -249,12 +265,17 @@ export function PublicWebsite({
           <h1 className="text-3xl font-serif mb-3">Reservation Confirmed!</h1>
           <p className="text-sm text-[#5A6355] mb-6">
             Thank you, <strong>{bookingContact.contactName}</strong>. Your stay at <strong>{selectedSite.label}</strong> is reserved.
-            A confirmation will be sent to <strong>{bookingContact.contactEmail}</strong>.
+            {bookingEmailSent ? (
+              <> A receipt has been emailed to <strong>{bookingContact.contactEmail}</strong> and to Pine Flats.</>
+            ) : (
+              <> A receipt will be sent to <strong>{bookingContact.contactEmail}</strong> and Pine Flats.</>
+            )}
           </p>
           <button
             onClick={() => {
               setBookingStep('browse');
               setBookingContact(null);
+              setBookingEmailSent(false);
               setSelectedSiteId(null);
               setCheckIn(null);
               setCheckOut(null);
@@ -356,7 +377,7 @@ export function PublicWebsite({
                 </p>
               ) : (
                 comments.slice(0, 20).map(c => (
-                  <div key={c.id} className="rounded-xl border border-[#F0EBE6] bg-[#FBF9F7] p-3">
+                  <div key={c.id} className="rounded-xl border border-[#F0EBE6] bg-[#FBF9F7] p-3 space-y-2">
                     <div className="flex items-center justify-between gap-2 mb-1">
                       <span className="text-xs font-semibold truncate">{c.name}</span>
                       {c.rating != null && (
@@ -372,13 +393,30 @@ export function PublicWebsite({
                     </div>
                     <p className="text-xs text-[#5A6355] leading-relaxed whitespace-pre-wrap">{c.comment}</p>
                     {c.createdAt && (
-                      <p className="text-[10px] text-[#A8B2A6] mt-1.5">
+                      <p className="text-[10px] text-[#A8B2A6]">
                         {new Date(c.createdAt).toLocaleDateString('en-US', {
-                          month: 'short',
+                          month: 'numeric',
                           day: 'numeric',
                           year: 'numeric',
                         })}
                       </p>
+                    )}
+                    {c.adminReply && (
+                      <div className="rounded-lg border border-[#A8B2A6]/40 bg-[#E8F0E8]/70 px-2.5 py-2 mt-1">
+                        <p className="text-[10px] uppercase tracking-wider text-[#3D5A3D] font-semibold mb-0.5">
+                          {c.adminReplyName || 'Pine Flats'}
+                          {c.adminReplyAt
+                            ? ` · ${new Date(c.adminReplyAt).toLocaleDateString('en-US', {
+                                month: 'numeric',
+                                day: 'numeric',
+                                year: 'numeric',
+                              })}`
+                            : ''}
+                        </p>
+                        <p className="text-xs text-[#3D3730] leading-relaxed whitespace-pre-wrap">
+                          {c.adminReply}
+                        </p>
+                      </div>
                     )}
                   </div>
                 ))
@@ -457,7 +495,7 @@ export function PublicWebsite({
 
             <p className="text-sm uppercase tracking-widest opacity-80 mb-4">Choose Your Rental</p>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
-              {RENTAL_OPTIONS.map(option => {
+              {rentalOptions.map(option => {
                 const Icon = option.icon;
                 const isSelected = selectedRental === option.type;
                 return (
@@ -477,8 +515,8 @@ export function PublicWebsite({
                     <p className={`text-lg font-serif font-bold leading-tight ${isSelected ? 'text-white' : 'text-[#C29474]'}`}>
                       {option.type === 'daily' ? (
                         <>
-                          <span className="block text-sm">{formatCurrency(DAILY_RENT_WEEKDAY)} Sun–Thu</span>
-                          <span className="block text-sm">{formatCurrency(DAILY_RENT_WEEKEND)} Fri–Sat</span>
+                          <span className="block text-sm">{formatCurrency(rates.dailyWeekday)} Sun–Thu</span>
+                          <span className="block text-sm">{formatCurrency(rates.dailyWeekend)} Fri–Sat</span>
                         </>
                       ) : (
                         option.price
@@ -496,7 +534,7 @@ export function PublicWebsite({
               <p className="text-sm mb-4 opacity-90">
                 Selected: <strong>{selectedOption.label}</strong>
                 {selectedOption.type !== 'daily' && <> — {selectedOption.price}</>}
-                {selectedOption.type === 'daily' && <> — {formatCurrency(getDailyRentForDate())} today</>}
+                {selectedOption.type === 'daily' && <> — {formatCurrency(getDailyRentForDate(new Date(), rates))} today</>}
                 {selectedSite && <> · <strong>{selectedSite.label}</strong></>}
                 {checkIn && checkOut && (
                   <> · {parseDate(checkIn).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – {parseDate(checkOut).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</>
@@ -587,6 +625,7 @@ export function PublicWebsite({
               selectedSiteLabel={selectedSite?.label ?? null}
               checkIn={checkIn}
               checkOut={checkOut}
+              rates={rates}
               onDatesChange={(start, end) => {
                 setCheckIn(start);
                 setCheckOut(end);
@@ -616,7 +655,13 @@ export function PublicWebsite({
           <div className="p-8 bg-[#FBF9F7] rounded-3xl border border-[#F0EBE6]">
             <Calendar className="w-12 h-12 text-[#5A6355] mx-auto mb-4 opacity-80" />
             <h3 className="text-xl font-serif mb-2">Flexible Stays</h3>
-            <p className="text-gray-600 text-sm leading-relaxed">Daily, weekly, or monthly — pick the stay that fits your schedule and budget.</p>
+            <p className="text-gray-600 text-sm leading-relaxed">
+              {rates.allowedRentalTypes.length === 1 && rates.allowedRentalTypes[0] === 'monthly'
+                ? 'Monthly stays with prorated partial months — pick the stay that fits your schedule.'
+                : rates.allowedRentalTypes.length === 1 && rates.allowedRentalTypes[0] === 'daily'
+                  ? 'Daily stays with weekday and weekend rates — pick the nights that fit your trip.'
+                  : 'Daily, weekly, or monthly — pick the stay that fits your schedule and budget.'}
+            </p>
           </div>
           <div className="p-8 bg-[#FBF9F7] rounded-3xl border border-[#F0EBE6]">
             <Phone className="w-12 h-12 text-[#5A6355] mx-auto mb-4 opacity-80" />

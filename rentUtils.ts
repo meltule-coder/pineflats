@@ -1,4 +1,4 @@
-import { RentalType } from './types';
+import { Property, PropertyRentalRates, RentalType } from './types';
 
 export const WEEKLY_RENT = 250;
 export const MONTHLY_RENT = 750;
@@ -7,15 +7,82 @@ export const MONTHLY_BILLING_DAYS = 30;
 export const DAILY_RENT_WEEKDAY = 49.99;
 export const DAILY_RENT_WEEKEND = 59.99;
 
-export function getDailyRentForDate(date: Date = new Date()): number {
-  const day = date.getDay();
-  return day === 5 || day === 6 ? DAILY_RENT_WEEKEND : DAILY_RENT_WEEKDAY;
+export const ALL_RENTAL_TYPES: RentalType[] = ['daily', 'weekly', 'monthly'];
+
+/**
+ * Big House / Little House rentals are monthly-only (no weekly or daily).
+ * Matches names like "Big House", "Big House Rental", "Little House Rental".
+ */
+export function isMonthlyOnlyHouseName(name?: string | null): boolean {
+  if (!name) return false;
+  const n = name.toLowerCase().replace(/\s+/g, ' ').trim();
+  return /(?:^|\b)(big|little)\s+house(?:\s+rental)?(?:\b|$)/.test(n);
 }
 
-export function rentAmountForType(rentalType: RentalType, date: Date = new Date()): number {
-  if (rentalType === 'weekly') return WEEKLY_RENT;
-  if (rentalType === 'daily') return getDailyRentForDate(date);
-  return MONTHLY_RENT;
+/**
+ * Tree house rentals are daily-only (no monthly or weekly).
+ * Matches "Tree house", "Treehouse", "Tree house Rental", etc.
+ */
+export function isDailyOnlyTreeHouseName(name?: string | null): boolean {
+  if (!name) return false;
+  const n = name.toLowerCase().replace(/\s+/g, ' ').trim();
+  return /tree\s*house/.test(n);
+}
+
+/** Which rental types a property offers (name rules, then explicit list, then all). */
+export function getAllowedRentalTypes(
+  property?: Pick<Property, 'name' | 'allowedRentalTypes'> | null
+): RentalType[] {
+  // Known product types always win so UI/API stay consistent
+  if (isMonthlyOnlyHouseName(property?.name)) {
+    return ['monthly'];
+  }
+  if (isDailyOnlyTreeHouseName(property?.name)) {
+    return ['daily'];
+  }
+  if (property?.allowedRentalTypes && property.allowedRentalTypes.length > 0) {
+    const set = new Set(property.allowedRentalTypes);
+    const filtered = ALL_RENTAL_TYPES.filter(t => set.has(t));
+    if (filtered.length > 0) return filtered;
+  }
+  return [...ALL_RENTAL_TYPES];
+}
+
+export function allowsRentalType(
+  property: Pick<Property, 'name' | 'allowedRentalTypes'> | null | undefined,
+  rentalType: RentalType
+): boolean {
+  return getAllowedRentalTypes(property).includes(rentalType);
+}
+
+export type RentalRatesConfig = Pick<
+  PropertyRentalRates,
+  'monthly' | 'weekly' | 'dailyWeekday' | 'dailyWeekend'
+>;
+
+export const DEFAULT_RENTAL_RATES: RentalRatesConfig = {
+  monthly: MONTHLY_RENT,
+  weekly: WEEKLY_RENT,
+  dailyWeekday: DAILY_RENT_WEEKDAY,
+  dailyWeekend: DAILY_RENT_WEEKEND,
+};
+
+export function getDailyRentForDate(
+  date: Date = new Date(),
+  rates: RentalRatesConfig = DEFAULT_RENTAL_RATES
+): number {
+  const day = date.getDay();
+  return day === 5 || day === 6 ? rates.dailyWeekend : rates.dailyWeekday;
+}
+
+export function rentAmountForType(
+  rentalType: RentalType,
+  date: Date = new Date(),
+  rates: RentalRatesConfig = DEFAULT_RENTAL_RATES
+): number {
+  if (rentalType === 'weekly') return rates.weekly;
+  if (rentalType === 'daily') return getDailyRentForDate(date, rates);
+  return rates.monthly;
 }
 
 export function dailyRateLabel(date: Date = new Date()): string {
@@ -23,18 +90,21 @@ export function dailyRateLabel(date: Date = new Date()): string {
   return day === 5 || day === 6 ? 'Friday–Saturday' : 'Sunday–Thursday';
 }
 
-export function formatDailyRateDescription(): string {
-  return `$${DAILY_RENT_WEEKDAY.toFixed(2)} Sun–Thu, $${DAILY_RENT_WEEKEND.toFixed(2)} Fri–Sat`;
+export function formatDailyRateDescription(rates: RentalRatesConfig = DEFAULT_RENTAL_RATES): string {
+  return `$${rates.dailyWeekday.toFixed(2)} Sun–Thu, $${rates.dailyWeekend.toFixed(2)} Fri–Sat`;
 }
 
-export function calculateWeeklyStayTotal(nights: number): number {
+export function calculateWeeklyStayTotal(
+  nights: number,
+  rates: RentalRatesConfig = DEFAULT_RENTAL_RATES
+): number {
   if (nights <= 0) return 0;
-  if (nights <= 7) return WEEKLY_RENT;
+  if (nights <= 7) return rates.weekly;
   const fullWeeks = Math.floor(nights / 7);
   const remainder = nights % 7;
-  const fullWeekTotal = fullWeeks * WEEKLY_RENT;
+  const fullWeekTotal = fullWeeks * rates.weekly;
   const proratedRemainder = remainder > 0
-    ? Math.round((remainder / 7) * WEEKLY_RENT * 100) / 100
+    ? Math.round((remainder / 7) * rates.weekly * 100) / 100
     : 0;
   return fullWeekTotal + proratedRemainder;
 }
@@ -76,7 +146,12 @@ export function monthlyProrationDivisor(start: Date, end: Date): number {
   return MONTHLY_BILLING_DAYS;
 }
 
-export function calculateStayTotal(rentalType: RentalType, checkIn: Date, checkOut: Date): number {
+export function calculateStayTotal(
+  rentalType: RentalType,
+  checkIn: Date,
+  checkOut: Date,
+  rates: RentalRatesConfig = DEFAULT_RENTAL_RATES
+): number {
   const nights: Date[] = [];
   let cursor = new Date(checkIn);
   while (cursor < checkOut) {
@@ -86,18 +161,21 @@ export function calculateStayTotal(rentalType: RentalType, checkIn: Date, checkO
   if (nights.length === 0) return 0;
 
   if (rentalType === 'daily') {
-    return Math.round(nights.reduce((sum, night) => sum + getDailyRentForDate(night), 0) * 100) / 100;
+    return Math.round(
+      nights.reduce((sum, night) => sum + getDailyRentForDate(night, rates), 0) * 100
+    ) / 100;
   }
   if (rentalType === 'weekly') {
-    return calculateWeeklyStayTotal(nights.length);
+    return calculateWeeklyStayTotal(nights.length, rates);
   }
-  return calculateMonthlyStayTotal(nights.length, checkIn, checkOut);
+  return calculateMonthlyStayTotal(nights.length, checkIn, checkOut, rates.monthly);
 }
 
 export function calculateMonthlyStayTotal(
   nights: number,
   checkIn?: Date,
-  checkOut?: Date
+  checkOut?: Date,
+  monthlyRate: number = MONTHLY_RENT
 ): number {
   if (nights <= 0) return 0;
   const lastNight = checkOut ? addDays(checkOut, -1) : undefined;
@@ -105,12 +183,11 @@ export function calculateMonthlyStayTotal(
     checkIn && lastNight && lastNight >= checkIn
       ? monthlyProrationDivisor(checkIn, lastNight)
       : MONTHLY_BILLING_DAYS;
-  const dailyRate = MONTHLY_RENT / divisor;
-  // Full month (or 30-day multi-month block) = full $750
+  const dailyRate = monthlyRate / divisor;
   if (nights >= divisor) {
     const fullBlocks = Math.floor(nights / divisor);
     const remainder = nights % divisor;
-    return Math.round((fullBlocks * MONTHLY_RENT + remainder * dailyRate) * 100) / 100;
+    return Math.round((fullBlocks * monthlyRate + remainder * dailyRate) * 100) / 100;
   }
   return Math.round(nights * dailyRate * 100) / 100;
 }

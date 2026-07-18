@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { MapPin, RefreshCw, ExternalLink, LogOut, Grid3x3, FileText, Save, UserPlus, ImagePlus, Trash2, Link as LinkIcon, Users } from 'lucide-react';
+import { MapPin, RefreshCw, ExternalLink, LogOut, Grid3x3, FileText, Save, UserPlus, ImagePlus, Trash2, Link as LinkIcon, Users, Wrench, CalendarRange } from 'lucide-react';
 import { ReceiptLink } from './ReceiptLink';
 import { Slot, SlotStatus, RentalType, StoredCustomer } from '../../types';
-import { rentAmountForType, formatDailyRateDescription, parseDateKey } from '../../rentUtils';
+import {
+  ALL_RENTAL_TYPES,
+  DEFAULT_RENTAL_RATES,
+  rentAmountForType, formatDailyRateDescription, parseDateKey,
+  type RentalRatesConfig,
+} from '../../rentUtils';
+import { fetchActiveRates } from '../lib/activeRates';
 
 function formatStayDate(key: string) {
   try {
@@ -56,6 +62,19 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
   const [siteImageUrlInput, setSiteImageUrlInput] = useState('');
   const [uploadingSlotId, setUploadingSlotId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [statusForm, setStatusForm] = useState({
+    guestName: '',
+    startDate: '',
+    endDate: '',
+    rentalType: 'monthly' as RentalType,
+    note: '',
+  });
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusPanel, setStatusPanel] = useState<'none' | 'reserve' | 'maintenance'>('none');
+  const [rates, setRates] = useState<RentalRatesConfig & { allowedRentalTypes?: RentalType[] }>({
+    ...DEFAULT_RENTAL_RATES,
+    allowedRentalTypes: ['daily', 'weekly', 'monthly'],
+  });
   const pendingUploadSlotIdRef = useRef<string | null>(null);
   const sitePhotoInputRef = useRef<HTMLInputElement>(null);
   const gridPhotoInputRef = useRef<HTMLInputElement>(null);
@@ -178,6 +197,28 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
   };
 
   useEffect(() => {
+    fetchActiveRates().then(active => {
+      setRates(active);
+      const allowed = active.allowedRentalTypes?.length
+        ? active.allowedRentalTypes
+        : [...ALL_RENTAL_TYPES];
+      const defaultType = allowed[0] ?? 'monthly';
+      setContactForm(prev => {
+        if (allowed.includes(prev.rentalType)) return prev;
+        const amount = String(rentAmountForType(defaultType, new Date(), active));
+        return { ...prev, rentalType: defaultType, rentAmount: amount, balanceDue: amount };
+      });
+      setStatusForm(prev => (
+        allowed.includes(prev.rentalType) ? prev : { ...prev, rentalType: defaultType }
+      ));
+    });
+  }, []);
+
+  const allowedRentalTypes = rates.allowedRentalTypes?.length
+    ? rates.allowedRentalTypes
+    : [...ALL_RENTAL_TYPES];
+
+  useEffect(() => {
     loadSlots();
     loadCustomers();
     loadSheetStatus();
@@ -272,9 +313,11 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
 
   const loadContactForm = async (slot: Slot) => {
     const rentalType = slot.rentalType ?? 'monthly';
-    const defaultRent = String(rentAmountForType(rentalType));
+    const defaultRent = String(rentAmountForType(rentalType, new Date(), rates));
 
     if (slot.status === 'available') {
+      const defaultType = (allowedRentalTypes[0] ?? 'monthly') as RentalType;
+      const defaultRent = String(rentAmountForType(defaultType, new Date(), rates));
       setSelectedCustomerId('');
       setContactForm({
         contactName: '',
@@ -284,9 +327,9 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
         contactLicensePlate: '',
         contactEmergency: '',
         contactNotes: '',
-        rentalType: 'monthly',
-        rentAmount: String(rentAmountForType('monthly')),
-        balanceDue: String(rentAmountForType('monthly')),
+        rentalType: defaultType,
+        rentAmount: defaultRent,
+        balanceDue: defaultRent,
       });
       setFormSaved(false);
       return;
@@ -344,9 +387,26 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     setFormSaved(false);
   };
 
+  const initStatusForm = (slot: Slot) => {
+    setStatusForm({
+      guestName: slot.contactName || slot.tenantName || '',
+      startDate: slot.startDate || '',
+      endDate: slot.endDate || '',
+      rentalType: slot.rentalType || 'monthly',
+      note: slot.notes || '',
+    });
+    setStatusError(null);
+    setStatusPanel(
+      slot.status === 'reserved' ? 'reserve'
+        : slot.status === 'maintenance' ? 'maintenance'
+        : 'none'
+    );
+  };
+
   const handleSelectSlot = async (slot: Slot) => {
     setSelectedSlot(slot);
     setSiteImageUrlInput('');
+    initStatusForm(slot);
     await loadContactForm(slot);
   };
 
@@ -421,21 +481,76 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     }
   };
 
-  const handleSlotUpdate = async (slot: Slot, status: SlotStatus) => {
-    const res = await fetch(`/api/slots/${slot.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
-    });
-    if (res.ok) {
-      await loadSlots();
-      onUpdate();
-      setSelectedSlot(null);
+  const handleSlotUpdate = async (slot: Slot, status: SlotStatus, extra: Record<string, unknown> = {}) => {
+    setStatusError(null);
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/api/slots/${slot.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, ...extra }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        await loadSlots();
+        onUpdate();
+        setSelectedSlot(updated);
+        initStatusForm(updated);
+        await loadContactForm(updated);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setStatusError(data.error || 'Could not update site status');
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
+  const handleSaveReservation = async () => {
+    if (!selectedSlot) return;
+    const { guestName, startDate, endDate, rentalType, note } = statusForm;
+    if (!startDate || !endDate) {
+      setStatusError('Check-in and check-out dates are required for a reservation.');
+      return;
+    }
+    if (endDate <= startDate) {
+      setStatusError('Check-out must be after check-in.');
+      return;
+    }
+    const name = guestName.trim() || 'Reserved guest';
+    await handleSlotUpdate(selectedSlot, 'reserved', {
+      contactName: name,
+      tenantName: name,
+      startDate,
+      endDate,
+      rentalType,
+      notes: note.trim() || undefined,
+      bookedAt: selectedSlot.bookedAt || new Date().toISOString().split('T')[0],
+    });
+    setStatusPanel('reserve');
+  };
+
+  const handleSaveMaintenance = async () => {
+    if (!selectedSlot) return;
+    const note = statusForm.note.trim();
+    if (!note) {
+      setStatusError('Add a maintenance note (e.g. plumbing, electric, pad repair).');
+      return;
+    }
+    await handleSlotUpdate(selectedSlot, 'maintenance', {
+      notes: note,
+    });
+    setStatusPanel('maintenance');
+  };
+
+  const handleMarkAvailable = async () => {
+    if (!selectedSlot) return;
+    await handleSlotUpdate(selectedSlot, 'available');
+    setStatusPanel('none');
+  };
+
   const handleRentalTypeChange = (rentalType: RentalType) => {
-    const rentAmount = String(rentAmountForType(rentalType));
+    const rentAmount = String(rentAmountForType(rentalType, new Date(), rates));
     setContactForm(prev => ({ ...prev, rentalType, rentAmount, balanceDue: rentAmount }));
     setFormSaved(false);
   };
@@ -826,6 +941,9 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                   {formatStayDate(slot.startDate)} – {formatStayDate(slot.endDate)}
                 </div>
               )}
+              {slot.status === 'maintenance' && slot.notes && (
+                <div className="text-[10px] mt-1 opacity-70 leading-snug line-clamp-2">{slot.notes}</div>
+              )}
               {slot.status !== 'available' && (slot.contactName || slot.tenantName) && (
                 <div className="text-xs mt-1 truncate opacity-80">{slot.contactName || slot.tenantName}</div>
               )}
@@ -1109,13 +1227,19 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                         onChange={e => handleRentalTypeChange(e.target.value as RentalType)}
                         className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
                       >
-                        <option value="monthly">Monthly ($750)</option>
-                        <option value="weekly">Weekly ($250)</option>
-                        <option value="daily">Daily ({formatDailyRateDescription()})</option>
+                        {allowedRentalTypes.includes('monthly') && (
+                          <option value="monthly">Monthly (${rates.monthly.toFixed(2)})</option>
+                        )}
+                        {allowedRentalTypes.includes('weekly') && (
+                          <option value="weekly">Weekly (${rates.weekly.toFixed(2)})</option>
+                        )}
+                        {allowedRentalTypes.includes('daily') && (
+                          <option value="daily">Daily ({formatDailyRateDescription(rates)})</option>
+                        )}
                       </select>
-                      {contactForm.rentalType === 'daily' && (
+                      {contactForm.rentalType === 'daily' && allowedRentalTypes.includes('daily') && (
                         <p className="text-xs text-[#5A6355]">
-                          Today&apos;s rate: ${rentAmountForType('daily').toFixed(2)}
+                          Today&apos;s rate: ${rentAmountForType('daily', new Date(), rates).toFixed(2)}
                         </p>
                       )}
                     </div>
@@ -1178,23 +1302,165 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
               )}
             </div>
 
-            <p className="text-xs text-[#5A6355] mb-4 uppercase tracking-wider">Change status</p>
+            <div className="border-t border-[#E2D9D0] pt-5 space-y-4">
+              <div>
+                <p className="text-xs text-[#5A6355] mb-1 uppercase tracking-wider font-semibold">Site status</p>
+                <p className="text-sm text-[#3D3730] capitalize mb-3">
+                  Currently: <strong>{selectedSlot.status}</strong>
+                  {selectedSlot.status === 'maintenance' && selectedSlot.notes
+                    ? ` — ${selectedSlot.notes}`
+                    : ''}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <button
+                  type="button"
+                  disabled={isLoading || selectedSlot.status === 'available'}
+                  onClick={handleMarkAvailable}
+                  className={`px-3 py-2.5 rounded-xl text-xs font-semibold border-2 transition ${STATUS_STYLES.available} ${selectedSlot.status === 'available' ? 'ring-2 ring-[#5A6355]' : ''} disabled:opacity-50`}
+                >
+                  Available
+                </button>
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => setStatusPanel(statusPanel === 'reserve' ? 'none' : 'reserve')}
+                  className={`px-3 py-2.5 rounded-xl text-xs font-semibold border-2 transition flex items-center justify-center gap-1 ${STATUS_STYLES.reserved} ${selectedSlot.status === 'reserved' || statusPanel === 'reserve' ? 'ring-2 ring-[#5A6355]' : ''}`}
+                >
+                  <CalendarRange className="w-3.5 h-3.5" />
+                  {selectedSlot.status === 'reserved' ? 'Edit reserve' : 'Reserve'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => setStatusPanel(statusPanel === 'maintenance' ? 'none' : 'maintenance')}
+                  className={`px-3 py-2.5 rounded-xl text-xs font-semibold border-2 transition flex items-center justify-center gap-1 ${STATUS_STYLES.maintenance} ${selectedSlot.status === 'maintenance' || statusPanel === 'maintenance' ? 'ring-2 ring-[#5A6355]' : ''}`}
+                >
+                  <Wrench className="w-3.5 h-3.5" />
+                  Maintenance
+                </button>
+                <button
+                  type="button"
+                  disabled={isLoading || selectedSlot.status === 'occupied'}
+                  onClick={() => handleSlotUpdate(selectedSlot, 'occupied')}
+                  className={`px-3 py-2.5 rounded-xl text-xs font-semibold border-2 transition ${STATUS_STYLES.occupied} ${selectedSlot.status === 'occupied' ? 'ring-2 ring-[#5A6355]' : ''} disabled:opacity-50`}
+                >
+                  Occupied
+                </button>
+              </div>
+
+              {statusPanel === 'reserve' && (
+                <div className="rounded-2xl border border-[#8B7FA8]/40 bg-[#E8E4F0]/40 p-4 space-y-3">
+                  <h4 className="text-sm font-serif text-[#4A3D6B]">
+                    {selectedSlot.status === 'reserved' ? 'Change reservation' : 'New reservation'}
+                  </h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1 sm:col-span-2">
+                      <label className="text-[10px] uppercase tracking-widest text-[#4A3D6B]/80">Guest name</label>
+                      <input
+                        value={statusForm.guestName}
+                        onChange={e => setStatusForm(p => ({ ...p, guestName: e.target.value }))}
+                        placeholder="Guest or party name"
+                        className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase tracking-widest text-[#4A3D6B]/80">Check-in *</label>
+                      <input
+                        type="date"
+                        value={statusForm.startDate}
+                        onChange={e => setStatusForm(p => ({ ...p, startDate: e.target.value }))}
+                        className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase tracking-widest text-[#4A3D6B]/80">Check-out *</label>
+                      <input
+                        type="date"
+                        value={statusForm.endDate}
+                        min={statusForm.startDate || undefined}
+                        onChange={e => setStatusForm(p => ({ ...p, endDate: e.target.value }))}
+                        className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase tracking-widest text-[#4A3D6B]/80">Rental type</label>
+                      <select
+                        value={statusForm.rentalType}
+                        onChange={e => setStatusForm(p => ({ ...p, rentalType: e.target.value as RentalType }))}
+                        className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm"
+                      >
+                        {allowedRentalTypes.includes('daily') && <option value="daily">Daily</option>}
+                        {allowedRentalTypes.includes('weekly') && <option value="weekly">Weekly</option>}
+                        {allowedRentalTypes.includes('monthly') && <option value="monthly">Monthly</option>}
+                      </select>
+                    </div>
+                    <div className="space-y-1 sm:col-span-2">
+                      <label className="text-[10px] uppercase tracking-widest text-[#4A3D6B]/80">Note (optional)</label>
+                      <input
+                        value={statusForm.note}
+                        onChange={e => setStatusForm(p => ({ ...p, note: e.target.value }))}
+                        placeholder="e.g. Phone hold, deposit pending"
+                        className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSaveReservation}
+                    disabled={isLoading}
+                    className="w-full flex items-center justify-center gap-2 bg-[#4A3D6B] text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#3a2f55] disabled:opacity-50"
+                  >
+                    <Save className="w-4 h-4" />
+                    {isLoading ? 'Saving…' : selectedSlot.status === 'reserved' ? 'Update reservation' : 'Reserve site'}
+                  </button>
+                </div>
+              )}
+
+              {statusPanel === 'maintenance' && (
+                <div className="rounded-2xl border border-[#B0A89E] bg-[#F0EBE6]/60 p-4 space-y-3">
+                  <h4 className="text-sm font-serif text-[#5A534D] flex items-center gap-2">
+                    <Wrench className="w-4 h-4" />
+                    Maintenance
+                  </h4>
+                  <p className="text-xs text-[#5A534D]/90">
+                    Mark this site unavailable and record why (required).
+                  </p>
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-widest text-[#5A534D]/80">Maintenance note *</label>
+                    <textarea
+                      value={statusForm.note}
+                      onChange={e => setStatusForm(p => ({ ...p, note: e.target.value }))}
+                      placeholder="e.g. Water hookup repair, pad grading, electrical"
+                      rows={3}
+                      className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm resize-none"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSaveMaintenance}
+                    disabled={isLoading}
+                    className="w-full flex items-center justify-center gap-2 bg-[#5A534D] text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#3d3934] disabled:opacity-50"
+                  >
+                    <Save className="w-4 h-4" />
+                    {isLoading ? 'Saving…' : 'Mark maintenance'}
+                  </button>
+                </div>
+              )}
+
+              {statusError && (
+                <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                  {statusError}
+                </p>
+              )}
+            </div>
+
             {receiptConnected && (
-              <div className="mb-4">
+              <div className="mt-4">
                 <ReceiptLink spaceNumber={String(selectedSlot.number)} variant="button" />
               </div>
             )}
-            <div className="grid grid-cols-2 gap-2">
-              {(['available', 'occupied', 'reserved', 'maintenance'] as SlotStatus[]).map(status => (
-                <button
-                  key={status}
-                  onClick={() => handleSlotUpdate(selectedSlot, status)}
-                  className={`px-3 py-2 rounded-xl text-xs font-medium capitalize border-2 transition ${STATUS_STYLES[status]} ${selectedSlot.status === status ? 'ring-2 ring-[#5A6355]' : ''}`}
-                >
-                  {status}
-                </button>
-              ))}
-            </div>
             <button onClick={() => setSelectedSlot(null)} className="mt-4 w-full text-sm text-[#5A6355] hover:text-[#3D3730] py-2">
               Close
             </button>
