@@ -69,6 +69,15 @@ export function removeTenantByName(tenantName: string): boolean {
   return true;
 }
 
+export function removeTenantById(id: string): Tenant | null {
+  const tenants = getTenants();
+  const index = tenants.findIndex(t => t.id === id);
+  if (index === -1) return null;
+  const [removed] = tenants.splice(index, 1);
+  saveTenants(tenants);
+  return removed;
+}
+
 export function findTenantByName(tenantName: string): Tenant | undefined {
   return getTenants().find(t => t.name.toLowerCase().includes(tenantName.toLowerCase()));
 }

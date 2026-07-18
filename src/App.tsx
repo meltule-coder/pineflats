@@ -5,42 +5,36 @@
 
 import { useEffect, useState } from 'react';
 import { ChatWidget } from './components/ChatWidget';
-import { PublicWebsite } from './components/PublicWebsite';
 import { CalendarWidget } from './components/CalendarWidget';
 import { SitesWidget } from './components/SitesWidget';
 import { PhotosWidget } from './components/PhotosWidget';
 import { ContactWidget } from './components/ContactWidget';
 import { CustomersWidget } from './components/CustomersWidget';
+import { WebsitePreviewWidget } from './components/WebsitePreviewWidget';
 import { TenantDetailPage } from './components/TenantDetailPage';
 import { TenantPaymentPage } from './components/TenantPaymentPage';
-import { Users, Image as ImageIcon, Search, Sparkles, Globe, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign, Settings } from 'lucide-react';
-import { Tenant, Photo, ParkContact } from '../types';
-import { DEFAULT_CONTACT } from '../contactDefaults';
+import { TenantReceiptPage } from './components/TenantReceiptPage';
+import { AddTenantWidget } from './components/AddTenantWidget';
+import { Users, Image as ImageIcon, Search, Sparkles, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign, Settings } from 'lucide-react';
+import { Tenant, Photo } from '../types';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'tenants' | 'sites' | 'photos' | 'marketing' | 'calendar' | 'settings'>('tenants');
-  const [availableSpots, setAvailableSpots] = useState(25);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
-  const [contact, setContact] = useState<ParkContact>(DEFAULT_CONTACT);
-  const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
-  const [tenantView, setTenantView] = useState<'info' | 'payment'>('info');
+  const [tenantView, setTenantView] = useState<'info' | 'payment' | 'receipt'>('info');
+  const [highlightPaymentId, setHighlightPaymentId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
   const loadData = async () => {
     try {
-      const [tRes, pRes, sRes, cRes] = await Promise.all([
+      const [tRes, pRes] = await Promise.all([
         fetch('/api/tenants'),
         fetch('/api/photos'),
-        fetch('/api/slots'),
-        fetch('/api/contact'),
       ]);
       setTenants(await tRes.json());
       setPhotos(await pRes.json());
-      const slotsData = await sRes.json();
-      setAvailableSpots(slotsData.available);
-      if (cRes.ok) setContact(await cRes.json());
     } catch (e) {
       console.error(e);
     }
@@ -54,31 +48,23 @@ export default function App() {
     }
   }, []);
 
-  const websitePhotos = photos.filter(p => p.published !== false);
-
-  if (isPreviewMode) {
-    return <PublicWebsite photos={websitePhotos} tenants={tenants} availableSpots={availableSpots} contact={contact} onBack={() => setIsPreviewMode(false)} />;
-  }
-
   return (
     <div className="min-h-screen bg-[#F7F3F0] font-sans selection:bg-[#E2D9D0] text-[#3D3730] flex flex-col">
       {/* Header */}
       <header className="bg-[#F7F3F0] pt-8 pb-4">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between mb-8">
           <div className="flex items-center gap-3">
+            <img
+              src="/logo.svg"
+              alt="Pine Flats logo"
+              className="h-14 w-14 sm:h-16 sm:w-16 object-contain rounded-xl border border-[#E2D9D0] bg-white shadow-sm p-1"
+            />
             <div>
               <h1 className="text-2xl font-serif italic text-[#5A6355] font-bold">Pine Flats</h1>
               <p className="text-[10px] uppercase tracking-widest opacity-60">Property Management</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <button 
-              onClick={() => setIsPreviewMode(true)}
-              className="hidden sm:flex items-center gap-2 bg-[#5A6355] text-white px-4 py-2 rounded-2xl hover:bg-[#3D3730] transition border border-[#E2D9D0]"
-            >
-              <Globe className="w-4 h-4" />
-              <span className="text-sm font-medium">Preview Website</span>
-            </button>
             <div className="flex items-center gap-3 bg-white/50 px-4 py-2 rounded-2xl border border-white">
               <div className="flex -space-x-2">
                 <div className="w-8 h-8 rounded-full bg-[#A8B2A6] border-2 border-[#EDE7E1] flex items-center justify-center text-[10px] text-white font-bold">D</div>
@@ -129,7 +115,7 @@ export default function App() {
             }`}
           >
             <ImageIcon className="w-4 h-4" />
-            Photos
+            Media
           </button>
           <button
             onClick={() => setActiveTab('marketing')}
@@ -173,7 +159,29 @@ export default function App() {
           return (
             <TenantPaymentPage
               tenant={tenant}
-              onBack={() => setTenantView('info')}
+              onBack={() => {
+                setTenantView('info');
+                void loadData();
+              }}
+              onViewReceipt={(paymentId) => {
+                setHighlightPaymentId(paymentId ?? null);
+                setTenantView('receipt');
+              }}
+            />
+          );
+        })()}
+
+        {activeTab === 'tenants' && selectedTenantId && tenantView === 'receipt' && (() => {
+          const tenant = tenants.find(t => t.id === selectedTenantId);
+          if (!tenant) return null;
+          return (
+            <TenantReceiptPage
+              tenant={tenant}
+              highlightPaymentId={highlightPaymentId}
+              onBack={() => {
+                setHighlightPaymentId(null);
+                setTenantView('payment');
+              }}
             />
           );
         })()}
@@ -184,15 +192,37 @@ export default function App() {
           return (
             <TenantDetailPage
               tenant={tenant}
-              onBack={() => { setSelectedTenantId(null); setTenantView('info'); }}
+              onBack={() => {
+                setSelectedTenantId(null);
+                setTenantView('info');
+                setHighlightPaymentId(null);
+                void loadData();
+              }}
               onPayments={() => setTenantView('payment')}
+              onViewReceipt={() => {
+                setHighlightPaymentId(null);
+                setTenantView('receipt');
+              }}
               onSave={async (updates) => {
                 const res = await fetch(`/api/tenants/${tenant.id}`, {
                   method: 'PUT',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(updates),
                 });
-                if (res.ok) await loadData();
+                if (!res.ok) {
+                  const data = await res.json().catch(() => ({}));
+                  throw new Error(data.error || 'Failed to save tenant');
+                }
+                await loadData();
+              }}
+              onRemove={async () => {
+                const res = await fetch(`/api/tenants/${tenant.id}`, { method: 'DELETE' });
+                if (res.ok) {
+                  setSelectedTenantId(null);
+                  setTenantView('info');
+                  setHighlightPaymentId(null);
+                  await loadData();
+                }
               }}
             />
           );
@@ -200,19 +230,29 @@ export default function App() {
 
         {activeTab === 'tenants' && !selectedTenantId && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <h2 className="text-xl font-serif text-[#3D3730]">Current Tenants</h2>
-              <div className="relative">
+              <div className="relative w-full sm:w-auto">
                 <Search className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-[#5A6355]" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
                   placeholder="Search tenants..."
-                  className="pl-10 pr-4 py-3 bg-white border border-[#E2D9D0] rounded-[24px] text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355] italic shadow-sm"
+                  className="w-full sm:w-auto pl-10 pr-4 py-3 bg-white border border-[#E2D9D0] rounded-[24px] text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355] italic shadow-sm"
                 />
               </div>
             </div>
+
+            <AddTenantWidget
+              onAdded={async (created) => {
+                await loadData();
+                if (created?.id) {
+                  setSelectedTenantId(created.id);
+                  setTenantView('info');
+                }
+              }}
+            />
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {[...tenants]
@@ -259,7 +299,7 @@ export default function App() {
               ))}
               {tenants.length === 0 && (
                 <div className="col-span-full py-16 text-center text-sm text-[#5A6355] bg-white rounded-[32px] border border-[#E2D9D0]">
-                  No tenants found. Ask the assistant to add one!
+                  No tenants found. Use <strong>Add Tenant</strong> above to create one.
                 </div>
               )}
             </div>
@@ -305,13 +345,16 @@ export default function App() {
         )}
 
         {activeTab === 'calendar' && (
-          <CalendarWidget />
+          <div className="space-y-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <CalendarWidget />
+            <CustomersWidget />
+          </div>
         )}
 
         {activeTab === 'settings' && (
           <div className="space-y-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <WebsitePreviewWidget />
             <ContactWidget onUpdate={loadData} />
-            <CustomersWidget />
           </div>
         )}
 

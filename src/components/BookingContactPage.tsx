@@ -56,6 +56,7 @@ function Field({
 }
 
 interface BookingContactPageProps {
+  slotId: string;
   siteLabel: string;
   rentalLabel: string;
   rentalType: RentalType;
@@ -66,6 +67,7 @@ interface BookingContactPageProps {
 }
 
 export function BookingContactPage({
+  slotId,
   siteLabel,
   rentalLabel,
   rentalType,
@@ -74,6 +76,8 @@ export function BookingContactPage({
   onBack,
   onContinue,
 }: BookingContactPageProps) {
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<BookingContactInfo>({
     contactName: '',
     contactPhone: '',
@@ -94,6 +98,35 @@ export function BookingContactPage({
   };
 
   const canContinue = form.contactName.trim() && form.contactPhone.trim() && form.contactEmail.trim();
+
+  const handleContinue = async () => {
+    if (!canContinue) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/bookings/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slotId,
+          rentalType,
+          checkIn,
+          checkOut,
+          ...form,
+        }),
+      });
+      if (res.ok) {
+        onContinue(form);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || 'Could not save your booking. Please try again.');
+      }
+    } catch {
+      setError('Could not reach the server. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#F7F3F0] font-sans text-[#3D3730]">
@@ -149,12 +182,18 @@ export function BookingContactPage({
           <Field label="Emergency Contact" icon={Phone} value={form.contactEmergency} onChange={v => update('contactEmergency', v)} placeholder="Name and phone number" />
           <Field label="Notes" icon={FileText} value={form.contactNotes} onChange={v => update('contactNotes', v)} placeholder="Arrival time, special requests, etc." multiline />
 
+          {error && (
+            <div className="rounded-xl border border-red-200 bg-red-50 text-red-700 px-4 py-3 text-sm">
+              {error}
+            </div>
+          )}
+
           <button
-            onClick={() => canContinue && onContinue(form)}
-            disabled={!canContinue}
+            onClick={handleContinue}
+            disabled={!canContinue || isSaving}
             className="w-full flex items-center justify-center gap-2 bg-[#C29474] text-white px-6 py-4 rounded-xl text-lg font-semibold shadow-lg hover:-translate-y-0.5 transition disabled:opacity-40 disabled:hover:translate-y-0"
           >
-            Continue to Payment
+            {isSaving ? 'Saving…' : 'Continue to Payment'}
             <ArrowRight className="w-5 h-5" />
           </button>
         </div>

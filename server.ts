@@ -11,6 +11,7 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import {
   getSlots, maintainSlots, updateSlot, saveSlots, assignSlot, clearSlotByTenant,
+  clearSlotByTenantId, clearSlotBySiteNumber,
   moveTenantSlot, getAvailableCount, getSpreadsheetId, setSpreadsheetId, TOTAL_SLOTS
 } from './server/slotsStore';
 
@@ -18,10 +19,14 @@ import {
   createSlotsSpreadsheet, writeSlotsToSheet, readSlotsFromSheet, getSpreadsheetUrl
 } from './server/googleSheets';
 import {
-  getTenants, getTenant, updateTenant, addTenant, removeTenantByName, findTenantByName, nextTenantId
+  getTenants, getTenant, updateTenant, addTenant, removeTenantByName, removeTenantById, findTenantByName, nextTenantId
 } from './server/tenantsStore';
 import {
-  getTenantPayment, updateTenantPayment, addPaymentRecord, addMeterRecord
+  getTenantPayment, updateTenantPayment, addPaymentRecord, updatePaymentRecord, deletePaymentRecord,
+  addExtraCharge, updateExtraCharge, deleteExtraCharge,
+  addCredit, updateCredit, deleteCredit,
+  addMeterRecord, setCurrentMeterReading, updateMeterRecord, deleteMeterRecord, deleteTenantPayment, startNewMonth,
+  addSavedCard, updateSavedCard, deleteSavedCard, getAllPaymentTotals, getTotalPaidForTenant
 } from './server/paymentsStore';
 import {
   getReceiptConfig, setReceiptDocUrl, setReceiptDocId, getReceiptUrlForSpace, extractDocId
@@ -29,7 +34,7 @@ import {
 import {
   listDocuments, verifyDocumentAccess, createReceiptDocument, getDocumentUrl
 } from './server/googleDocs';
-import { rentAmountForType, calculateStayTotal, parseDateKey } from './rentUtils';
+import { rentAmountForType } from './rentUtils';
 import {
   getPhotos, getPublishedPhotos, addPhoto, updatePhoto, deletePhoto, reorderPhotos
 } from './server/photosStore';
@@ -37,7 +42,13 @@ import { getContactInfo, updateContactInfo } from './server/contactStore';
 import {
   getCustomers, addCustomer, updateCustomer, deleteCustomer, upsertCustomer
 } from './server/customersStore';
+import { getPublicAvailability, getPublicSiteBundle } from './server/publicData';
+import { getComments, addComment } from './server/commentsStore';
 import { SLOT_CONTACT_CLEAR, clearSlotContactFields } from './server/slotContactUtils';
+import { verifyPreviewPassword, setPreviewPassword, getPreviewPassword } from './server/previewStore';
+import {
+  parseBookingRequest, canBookSlot, buildSlotBookingUpdates, ParsedBooking
+} from './server/bookingUtils';
 
 // Initialize Gemini API
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -60,16 +71,24 @@ const imageUploadOptions = {
   },
 };
 
+const mediaUploadOptions = {
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB for videos
+  fileFilter: (_req: express.Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype.startsWith('video/')) cb(null, true);
+    else cb(new Error('Only image or video files are allowed'));
+  },
+};
+
 const photoUpload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
     filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname) || '.jpg';
-      const base = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9.-]/g, '_').slice(0, 40) || 'photo';
+      const ext = path.extname(file.originalname) || (file.mimetype.startsWith('video/') ? '.mp4' : '.jpg');
+      const base = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9.-]/g, '_').slice(0, 40) || 'media';
       cb(null, `${Date.now()}-${base}${ext}`);
     },
   }),
-  ...imageUploadOptions,
+  ...mediaUploadOptions,
 });
 
 const sitePhotoUpload = multer({
@@ -108,33 +127,276 @@ async function startServer() {
     res.json({ status: 'ok' });
   });
 
+  // --- Public website APIs (no tenant/customer/returning-guest PII) ---
+  app.get('/api/public/availability', (_req, res) => {
+    res.json(getPublicAvailability());
+  });
+
+  app.get('/api/public/site', (_req, res) => {
+    res.json(getPublicSiteBundle());
+  });
+
+  app.get('/api/public/photos', (_req, res) => {
+    res.json(getPublishedPhotos());
+  });
+
+  app.get('/api/preview/status', (_req, res) => {
+    res.json({ configured: !!getPreviewPassword() });
+  });
+
+  app.post('/api/preview/login', (req, res) => {
+    const { password } = req.body;
+    if (!verifyPreviewPassword(password)) {
+      return res.status(401).json({ error: 'Incorrect password' });
+    }
+    res.json({ ok: true });
+  });
+
+  app.put('/api/preview/password', (req, res) => {
+    try {
+      const { currentPassword, newPassword } = req.body;
+      if (!verifyPreviewPassword(currentPassword)) {
+        return res.status(401).json({ error: 'Current password is incorrect' });
+      }
+      setPreviewPassword(newPassword);
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(400).json({ error: 'Failed to update preview password' });
+    }
+  });
+
   // Data routes
   app.get('/api/tenants', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Tenant records are not available on the public website' });
+    }
     res.json(getTenants());
   });
 
+  app.post('/api/tenants', (req, res) => {
+    const {
+      name,
+      site,
+      phone = '',
+      email = '',
+      rvType = '',
+      licensePlate = '',
+      emergencyContact = '',
+      notes = '',
+      startDate,
+      endDate = 'ongoing',
+      rentalType = 'monthly',
+      rentAmount,
+      balanceDue,
+    } = req.body || {};
+
+    const tenantName = String(name || '').trim();
+    const siteNumber = String(site || '').trim();
+    if (!tenantName) return res.status(400).json({ error: 'Name is required' });
+    if (!siteNumber) return res.status(400).json({ error: 'Site is required' });
+
+    const slots = getSlots();
+    const slot = slots.find(
+      (s) =>
+        String(s.number) === siteNumber ||
+        s.label.toLowerCase().replace(/\s+/g, '') === siteNumber.toLowerCase().replace(/\s+/g, '')
+    );
+    if (!slot) return res.status(404).json({ error: `Site ${siteNumber} not found` });
+    if (slot.status !== 'available') {
+      return res.status(400).json({ error: `Site ${slot.number} is not available` });
+    }
+
+    const resolvedRentalType = ['daily', 'weekly', 'monthly'].includes(rentalType)
+      ? rentalType
+      : 'monthly';
+    const resolvedRent = Number(rentAmount) || rentAmountForType(resolvedRentalType);
+    const resolvedBalance = Number(balanceDue) || resolvedRent;
+    const tenantId = nextTenantId();
+    const resolvedStart = startDate || new Date().toISOString().split('T')[0];
+
+    const tenant = addTenant({
+      id: tenantId,
+      name: tenantName,
+      site: String(slot.number),
+      status: 'Active',
+      rentalType: resolvedRentalType,
+      phone: String(phone || ''),
+      email: String(email || ''),
+      rvType: String(rvType || ''),
+      licensePlate: String(licensePlate || ''),
+      emergencyContact: String(emergencyContact || ''),
+      notes: String(notes || ''),
+      description: String(notes || ''),
+      startDate: resolvedStart,
+      endDate: String(endDate || 'ongoing'),
+      imageUrl:
+        'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=400',
+    });
+
+    updateTenantPayment(tenantId, {
+      rentalType: resolvedRentalType,
+      rentAmount: resolvedRent,
+      balanceDue: resolvedBalance,
+    });
+
+    assignSlot(String(slot.number), {
+      id: tenantId,
+      name: tenantName,
+      startDate: resolvedStart,
+      endDate: String(endDate || 'ongoing'),
+      description: String(notes || ''),
+    });
+
+    if (tenantName) {
+      upsertCustomer({
+        name: tenantName,
+        phone: String(phone || ''),
+        email: String(email || ''),
+        rvType: String(rvType || ''),
+        licensePlate: String(licensePlate || ''),
+        emergencyContact: String(emergencyContact || ''),
+        notes: String(notes || ''),
+      });
+    }
+
+    res.status(201).json(tenant);
+  });
+
   app.get('/api/tenants/:id', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Tenant records are not available on the public website' });
+    }
     const tenant = getTenant(req.params.id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
     res.json(tenant);
   });
 
   app.put('/api/tenants/:id', (req, res) => {
-    const updated = updateTenant(req.params.id, req.body);
+    const existing = getTenant(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Tenant not found' });
+
+    const body = req.body || {};
+    const nextName = body.name !== undefined ? String(body.name).trim() : existing.name;
+    const nextSite = body.site !== undefined ? String(body.site).trim() : existing.site;
+
+    if (!nextName) return res.status(400).json({ error: 'Name is required' });
+    if (!nextSite) return res.status(400).json({ error: 'Site is required' });
+
+    const siteChanged = String(nextSite) !== String(existing.site);
+    if (siteChanged) {
+      const slots = getSlots();
+      const target = slots.find(
+        (s) =>
+          String(s.number) === String(nextSite) ||
+          s.label.toLowerCase().replace(/\s+/g, '') === String(nextSite).toLowerCase().replace(/\s+/g, '')
+      );
+      if (!target) return res.status(404).json({ error: `Site ${nextSite} not found` });
+      if (target.status !== 'available' && target.tenantId !== existing.id) {
+        return res.status(400).json({ error: `Site ${target.number} is not available` });
+      }
+
+      clearSlotByTenantId(existing.id);
+      if (existing.site) clearSlotBySiteNumber(existing.site);
+    }
+
+    const allowed: Partial<typeof existing> = {};
+    const fields = [
+      'name', 'site', 'status', 'rentalType', 'imageUrl', 'startDate', 'endDate',
+      'description', 'phone', 'email', 'rvType', 'licensePlate', 'emergencyContact', 'notes',
+    ] as const;
+    for (const key of fields) {
+      if (body[key] !== undefined) {
+        (allowed as any)[key] = body[key];
+      }
+    }
+    allowed.name = nextName;
+    allowed.site = String(
+      (() => {
+        const slots = getSlots();
+        const match = slots.find(
+          (s) =>
+            String(s.number) === String(nextSite) ||
+            s.label.toLowerCase().replace(/\s+/g, '') === String(nextSite).toLowerCase().replace(/\s+/g, '')
+        );
+        return match ? match.number : nextSite;
+      })()
+    );
+
+    const updated = updateTenant(req.params.id, allowed);
     if (!updated) return res.status(404).json({ error: 'Tenant not found' });
+
+    // Keep slot occupancy/name in sync with tenant record
+    const assigned = assignSlot(String(updated.site), {
+      id: updated.id,
+      name: updated.name,
+      startDate: updated.startDate,
+      endDate: updated.endDate,
+      description: updated.notes || updated.description,
+    });
+    if (!assigned && siteChanged) {
+      return res.status(400).json({ error: `Could not assign site ${updated.site}` });
+    }
+
+    if (body.rentalType || body.startDate !== undefined || body.endDate !== undefined) {
+      // Recompute monthly proration when rental type or stay dates change
+      updateTenantPayment(updated.id, {
+        ...(body.rentalType ? { rentalType: body.rentalType } : {}),
+      });
+    }
+
+    if (updated.name) {
+      upsertCustomer({
+        name: updated.name,
+        phone: updated.phone,
+        email: updated.email,
+        rvType: updated.rvType,
+        licensePlate: updated.licensePlate,
+        emergencyContact: updated.emergencyContact,
+        notes: updated.notes || updated.description,
+      });
+    }
+
     res.json(updated);
+  });
+
+  app.delete('/api/tenants/:id', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    clearSlotByTenantId(tenant.id);
+    if (tenant.site) clearSlotBySiteNumber(tenant.site);
+    if (tenant.name) clearSlotByTenant(tenant.name);
+    removeTenantById(tenant.id);
+    deleteTenantPayment(tenant.id);
+
+    res.json({ ok: true, removed: tenant });
+  });
+
+  app.get('/api/payments/totals', (_req, res) => {
+    res.json(getAllPaymentTotals());
   });
 
   app.get('/api/tenants/:id/payments', (req, res) => {
     const tenant = getTenant(req.params.id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-    res.json(getTenantPayment(req.params.id));
+    const payment = getTenantPayment(req.params.id);
+    res.json({
+      ...payment,
+      totalPaidAllTime: getTotalPaidForTenant(req.params.id),
+    });
   });
 
   app.put('/api/tenants/:id/payments', (req, res) => {
     const tenant = getTenant(req.params.id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
     const updated = updateTenantPayment(req.params.id, req.body);
+    res.json(updated);
+  });
+
+  app.post('/api/tenants/:id/payments/new-period', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const updated = startNewMonth(req.params.id);
     res.json(updated);
   });
 
@@ -152,18 +414,212 @@ async function startServer() {
     res.json(updated);
   });
 
+  app.post('/api/tenants/:id/payments/cards', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    // Security: never accept or log full PAN / CVV
+    const body = req.body || {};
+    const last4 = body.last4 ?? body.cardLast4;
+    // If a longer number was sent, only last4 is used; full value is not persisted
+    const updated = addSavedCard(req.params.id, {
+      cardholderName: body.cardholderName,
+      last4,
+      brand: body.brand,
+      expMonth: body.expMonth,
+      expYear: body.expYear,
+      billingZip: body.billingZip,
+      label: body.label,
+      notes: body.notes,
+      isDefault: body.isDefault,
+    });
+    if (!updated) {
+      return res.status(400).json({
+        error: 'Cardholder name, last 4 digits, brand, and valid expiry are required. Full card numbers and CVV are not accepted.',
+      });
+    }
+    res.status(201).json(updated);
+  });
+
+  app.put('/api/tenants/:id/payments/cards/:cardId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const body = req.body || {};
+    const updated = updateSavedCard(req.params.id, req.params.cardId, {
+      cardholderName: body.cardholderName,
+      last4: body.last4 ?? body.cardLast4,
+      brand: body.brand,
+      expMonth: body.expMonth,
+      expYear: body.expYear,
+      billingZip: body.billingZip,
+      label: body.label,
+      notes: body.notes,
+      isDefault: body.isDefault,
+    });
+    if (!updated) return res.status(404).json({ error: 'Card not found or invalid data' });
+    res.json(updated);
+  });
+
+  app.delete('/api/tenants/:id/payments/cards/:cardId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const updated = deleteSavedCard(req.params.id, req.params.cardId);
+    if (!updated) return res.status(404).json({ error: 'Card not found' });
+    res.json(updated);
+  });
+
+  app.put('/api/tenants/:id/payments/record/:recordId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const { date, amount, method, note } = req.body || {};
+    if (amount !== undefined && (Number(amount) <= 0 || Number.isNaN(Number(amount)))) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+    const updated = updatePaymentRecord(req.params.id, req.params.recordId, {
+      date,
+      amount: amount !== undefined ? Number(amount) : undefined,
+      method,
+      note,
+    });
+    if (!updated) return res.status(404).json({ error: 'Payment record not found' });
+    res.json(updated);
+  });
+
+  app.delete('/api/tenants/:id/payments/record/:recordId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const updated = deletePaymentRecord(req.params.id, req.params.recordId);
+    if (!updated) return res.status(404).json({ error: 'Payment record not found' });
+    res.json(updated);
+  });
+
+  app.post('/api/tenants/:id/payments/charges', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    try {
+      const { date, amount, description, note } = req.body || {};
+      const updated = addExtraCharge(req.params.id, {
+        date: date || new Date().toISOString().split('T')[0],
+        amount: Number(amount),
+        description: description || '',
+        note,
+      });
+      res.status(201).json(updated);
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : 'Failed to add charge' });
+    }
+  });
+
+  app.put('/api/tenants/:id/payments/charges/:chargeId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const { date, amount, description, note } = req.body || {};
+    const updated = updateExtraCharge(req.params.id, req.params.chargeId, {
+      date,
+      amount: amount !== undefined ? Number(amount) : undefined,
+      description,
+      note,
+    });
+    if (!updated) return res.status(404).json({ error: 'Charge not found or invalid' });
+    res.json(updated);
+  });
+
+  app.delete('/api/tenants/:id/payments/charges/:chargeId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const updated = deleteExtraCharge(req.params.id, req.params.chargeId);
+    if (!updated) return res.status(404).json({ error: 'Charge not found' });
+    res.json(updated);
+  });
+
+  app.post('/api/tenants/:id/payments/credits', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    try {
+      const { date, amount, description, note } = req.body || {};
+      const updated = addCredit(req.params.id, {
+        date: date || new Date().toISOString().split('T')[0],
+        amount: Number(amount),
+        description: description || '',
+        note,
+      });
+      res.status(201).json(updated);
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : 'Failed to add credit' });
+    }
+  });
+
+  app.put('/api/tenants/:id/payments/credits/:creditId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const { date, amount, description, note } = req.body || {};
+    const updated = updateCredit(req.params.id, req.params.creditId, {
+      date,
+      amount: amount !== undefined ? Number(amount) : undefined,
+      description,
+      note,
+    });
+    if (!updated) return res.status(404).json({ error: 'Credit not found or invalid' });
+    res.json(updated);
+  });
+
+  app.delete('/api/tenants/:id/payments/credits/:creditId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const updated = deleteCredit(req.params.id, req.params.creditId);
+    if (!updated) return res.status(404).json({ error: 'Credit not found' });
+    res.json(updated);
+  });
+
   app.post('/api/tenants/:id/payments/meter', (req, res) => {
     const tenant = getTenant(req.params.id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-    const { date, reading, note } = req.body;
-    if (reading === undefined || reading === null || Number(reading) < 0) {
+    const { date, reading, note, previousReading, replaceLatest } = req.body;
+    if (reading === undefined || reading === null || Number(reading) < 0 || Number.isNaN(Number(reading))) {
       return res.status(400).json({ error: 'Invalid meter reading' });
     }
-    const updated = addMeterRecord(req.params.id, {
+    const prev =
+      previousReading !== undefined && previousReading !== null && previousReading !== ''
+        ? Number(previousReading)
+        : undefined;
+    if (prev !== undefined && (Number.isNaN(prev) || prev < 0)) {
+      return res.status(400).json({ error: 'Invalid previous meter reading' });
+    }
+
+    const payload = {
       date: date || new Date().toISOString().split('T')[0],
       reading: Number(reading),
       note,
+      previousReading: prev,
+    };
+
+    const updated = replaceLatest
+      ? setCurrentMeterReading(req.params.id, payload)
+      : addMeterRecord(req.params.id, payload);
+    res.json(updated);
+  });
+
+  app.put('/api/tenants/:id/payments/meter/:recordId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const { date, reading, note, previousReading } = req.body || {};
+    if (reading !== undefined && (Number(reading) < 0 || Number.isNaN(Number(reading)))) {
+      return res.status(400).json({ error: 'Invalid meter reading' });
+    }
+    const updated = updateMeterRecord(req.params.id, req.params.recordId, {
+      date,
+      reading: reading !== undefined ? Number(reading) : undefined,
+      note,
+      previousReading: previousReading !== undefined ? Number(previousReading) : undefined,
     });
+    if (!updated) return res.status(404).json({ error: 'Meter record not found' });
+    res.json(updated);
+  });
+
+  app.delete('/api/tenants/:id/payments/meter/:recordId', (req, res) => {
+    const tenant = getTenant(req.params.id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const updated = deleteMeterRecord(req.params.id, req.params.recordId);
+    if (!updated) return res.status(404).json({ error: 'Meter record not found' });
     res.json(updated);
   });
 
@@ -265,20 +721,42 @@ async function startServer() {
     res.json(updateContactInfo({ phone, email, contactName, address, tagline }));
   });
 
+  app.get('/api/comments', (_req, res) => {
+    res.json(getComments());
+  });
+
+  app.post('/api/comments', (req, res) => {
+    const { name, comment, rating } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+    if (!comment || typeof comment !== 'string' || !comment.trim()) {
+      return res.status(400).json({ error: 'Comment is required' });
+    }
+    if (comment.trim().length < 3) {
+      return res.status(400).json({ error: 'Comment is too short' });
+    }
+    res.status(201).json(addComment({ name, comment, rating }));
+  });
+
   app.get('/api/photos', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.json(getPublishedPhotos());
+    }
     const publishedOnly = req.query.published === 'true';
     res.json(publishedOnly ? getPublishedPhotos() : getPhotos());
   });
 
   app.post('/api/photos', (req, res) => {
-    const { url, caption, published } = req.body;
+    const { url, caption, published, mediaType } = req.body;
     if (!url || typeof url !== 'string') {
-      return res.status(400).json({ error: 'Photo URL is required' });
+      return res.status(400).json({ error: 'Media URL is required' });
     }
     const photo = addPhoto({
       url,
-      caption: (caption || 'Park Photo').trim(),
+      caption: (caption || 'Park media').trim(),
       published: published !== false,
+      mediaType: mediaType === 'video' ? 'video' : undefined,
     });
     res.status(201).json(photo);
   });
@@ -289,14 +767,16 @@ async function startServer() {
         return res.status(400).json({ error: err.message || 'Upload failed' });
       }
       if (!req.file) {
-        return res.status(400).json({ error: 'No photo file provided' });
+        return res.status(400).json({ error: 'No media file provided' });
       }
-      const caption = (req.body.caption || 'Park Photo').trim();
+      const isVideo = req.file.mimetype.startsWith('video/');
+      const caption = (req.body.caption || (isVideo ? 'Park Video' : 'Park Photo')).trim();
       const published = req.body.published !== 'false';
       const photo = addPhoto({
         url: `/uploads/${req.file.filename}`,
         caption,
         published,
+        mediaType: isVideo ? 'video' : 'image',
       });
       res.status(201).json(photo);
     });
@@ -333,6 +813,10 @@ async function startServer() {
   });
 
   app.get('/api/slots', (req, res) => {
+    // Public website must use /api/public/* — do not send guest contact fields there
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.json(getPublicAvailability());
+    }
     const slots = maintainSlots();
     res.json({
       slots,
@@ -366,11 +850,20 @@ async function startServer() {
     res.json(updated);
   });
 
-  app.get('/api/customers', (_req, res) => {
+  // Returning customers — back office only. Never used by the public website.
+  app.get('/api/customers', (req, res) => {
+    // Block obvious public-site usage; managers use these from the back office UI
+    const purpose = String(req.headers['x-pineflats-client'] || '');
+    if (purpose === 'public-website') {
+      return res.status(403).json({ error: 'Customer records are not available on the public website' });
+    }
     res.json(getCustomers());
   });
 
   app.post('/api/customers', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Customer records are not available on the public website' });
+    }
     const { name, phone, email, rvType, licensePlate, emergencyContact, notes } = req.body;
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Customer name is required' });
@@ -380,6 +873,9 @@ async function startServer() {
   });
 
   app.post('/api/customers/upsert', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Customer records are not available on the public website' });
+    }
     const { name, phone, email, rvType, licensePlate, emergencyContact, notes } = req.body;
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Customer name is required' });
@@ -388,12 +884,18 @@ async function startServer() {
   });
 
   app.put('/api/customers/:id', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Customer records are not available on the public website' });
+    }
     const updated = updateCustomer(req.params.id, req.body);
     if (!updated) return res.status(404).json({ error: 'Customer not found' });
     res.json(updated);
   });
 
   app.delete('/api/customers/:id', (req, res) => {
+    if (String(req.headers['x-pineflats-client'] || '') === 'public-website') {
+      return res.status(403).json({ error: 'Customer records are not available on the public website' });
+    }
     if (!deleteCustomer(req.params.id)) {
       return res.status(404).json({ error: 'Customer not found' });
     }
@@ -431,80 +933,93 @@ async function startServer() {
     res.json(updated);
   });
 
-  app.post('/api/bookings', (req, res) => {
-    const {
-      slotId,
-      rentalType = 'monthly',
-      checkIn,
-      checkOut,
-      contactName,
-      contactPhone,
-      contactEmail,
-      contactRvType,
-      contactLicensePlate,
-      contactEmergency,
-      contactNotes,
-      paymentMethod,
-    } = req.body;
-
-    const name = (contactName || '').trim();
-    if (!name) return res.status(400).json({ error: 'Contact name is required' });
-    if (!slotId) return res.status(400).json({ error: 'Site is required' });
-    if (!checkIn || !checkOut) return res.status(400).json({ error: 'Check-in and check-out dates are required' });
-
-    const slots = getSlots();
-    const slot = slots.find(s => s.id === slotId);
-    if (!slot) return res.status(404).json({ error: 'Site not found' });
-    if (slot.status !== 'available') {
-      return res.status(400).json({ error: 'This site is no longer available' });
-    }
-
-    const checkInDate = parseDateKey(checkIn);
-    const checkOutDate = parseDateKey(checkOut);
-    if (checkOutDate <= checkInDate) {
-      return res.status(400).json({ error: 'Check-out must be after check-in' });
-    }
-
-    const total = calculateStayTotal(rentalType, checkInDate, checkOutDate);
-    if (total <= 0) return res.status(400).json({ error: 'Invalid stay dates' });
-
+  function saveBookingToSlot(parsed: ParsedBooking, paid: boolean) {
+    // Returning-customer store is back-office only; still upsert for managers
     upsertCustomer({
-      name,
-      phone: contactPhone,
-      email: contactEmail,
-      rvType: contactRvType,
-      licensePlate: contactLicensePlate,
-      emergencyContact: contactEmergency,
-      notes: contactNotes,
+      name: parsed.name,
+      phone: parsed.contactPhone,
+      email: parsed.contactEmail,
+      rvType: parsed.contactRvType,
+      licensePlate: parsed.contactLicensePlate,
+      emergencyContact: parsed.contactEmergency,
+      notes: parsed.contactNotes,
     });
 
-    const updated = updateSlot(slotId, {
-      status: 'reserved',
-      contactName: name,
-      contactPhone: contactPhone || '',
-      contactEmail: contactEmail || '',
-      contactRvType: contactRvType || '',
-      contactLicensePlate: contactLicensePlate || '',
-      contactEmergency: contactEmergency || '',
-      contactNotes: contactNotes || '',
-      rentalType,
-      rentAmount: total,
-      balanceDue: 0,
-      startDate: checkIn,
-      endDate: checkOut,
-      paymentMethod: paymentMethod || 'Card',
-      bookedAt: new Date().toISOString().split('T')[0],
-      notes: `Booked online via ${paymentMethod || 'Card'}`,
+    updateSlot(parsed.slotId, buildSlotBookingUpdates(parsed, paid));
+    const slot = maintainSlots().find(s => s.id === parsed.slotId);
+    // Public booking response: no other guests' data; only this booking confirmation
+    return {
+      success: true as const,
+      total: parsed.total,
+      paymentMethod: parsed.paymentMethod,
+      checkIn: parsed.checkIn,
+      checkOut: parsed.checkOut,
+      siteLabel: slot?.label ?? parsed.slotId,
+      siteNumber: slot?.number,
+      status: paid ? 'reserved' as const : 'reserved' as const,
+      paid,
+    };
+  }
+
+  app.post('/api/bookings/start', (req, res) => {
+    const parsed = parseBookingRequest(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+    const slot = getSlots().find(s => s.id === parsed.data.slotId);
+    if (!slot) return res.status(404).json({ error: 'Site not found' });
+
+    const slotError = canBookSlot(slot, parsed.data.email, true);
+    if (slotError) return res.status(400).json({ error: slotError });
+
+    const result = saveBookingToSlot(parsed.data, false);
+    res.status(201).json(result);
+  });
+
+  app.post('/api/bookings', (req, res) => {
+    const parsed = parseBookingRequest(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+    const slot = getSlots().find(s => s.id === parsed.data.slotId);
+    if (!slot) return res.status(404).json({ error: 'Site not found' });
+
+    const slotError = canBookSlot(slot, parsed.data.email, true);
+    if (slotError) return res.status(400).json({ error: slotError });
+
+    const result = saveBookingToSlot(parsed.data, true);
+    res.status(201).json(result);
+  });
+
+  app.post('/api/slots/:id/remove-tenant', (req, res) => {
+    const slots = getSlots();
+    const slot = slots.find(s => s.id === req.params.id);
+    if (!slot) return res.status(404).json({ error: 'Slot not found' });
+
+    const hasTenant = !!(slot.tenantId || slot.tenantName || slot.contactName);
+    if (!hasTenant && slot.status === 'available') {
+      return res.status(400).json({ error: 'No tenant assigned to this site' });
+    }
+
+    if (slot.tenantId) {
+      const tenant = getTenant(slot.tenantId);
+      if (tenant) {
+        removeTenantById(tenant.id);
+        deleteTenantPayment(tenant.id);
+      } else {
+        removeTenantById(slot.tenantId);
+        deleteTenantPayment(slot.tenantId);
+      }
+    } else if (slot.tenantName) {
+      removeTenantByName(slot.tenantName);
+    }
+
+    const updated = updateSlot(slot.id, {
+      ...SLOT_CONTACT_CLEAR,
+      status: 'available',
+      paymentMethod: undefined,
+      bookedAt: undefined,
     });
 
-    res.status(201).json({
-      success: true,
-      slot: maintainSlots().find(s => s.id === slotId) ?? updated,
-      total,
-      paymentMethod: paymentMethod || 'Card',
-      checkIn,
-      checkOut,
-    });
+    res.json({ ok: true, slot: updated });
   });
 
   app.post('/api/slots/:id/add-tenant', (req, res) => {

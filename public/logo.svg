@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" role="img" aria-label="Pine Flats RV Park">
+  <!-- Three pine trees -->
+  <g fill="#5A6B4A" stroke="#4A5A3C" stroke-width="1.5" stroke-linejoin="round">
+    <!-- Left tree -->
+    <path d="M70 168 L95 110 L120 168 Z"/>
+    <path d="M74 148 L95 98 L116 148 Z"/>
+    <path d="M78 128 L95 88 L112 128 Z"/>
+    <rect x="91" y="168" width="8" height="28" rx="1" fill="#6B5A3E" stroke="none"/>
+    <!-- Center tree (taller) -->
+    <path d="M125 175 L160 95 L195 175 Z"/>
+    <path d="M130 152 L160 80 L190 152 Z"/>
+    <path d="M136 128 L160 68 L184 128 Z"/>
+    <rect x="155" y="175" width="10" height="32" rx="1" fill="#6B5A3E" stroke="none"/>
+    <!-- Right tree -->
+    <path d="M200 168 L225 110 L250 168 Z"/>
+    <path d="M204 148 L225 98 L246 148 Z"/>
+    <path d="M208 128 L225 88 L242 128 Z"/>
+    <rect x="221" y="168" width="8" height="28" rx="1" fill="#6B5A3E" stroke="none"/>
+  </g>
+
+  <!-- Cowboy hat -->
+  <g>
+    <ellipse cx="160" cy="168" rx="42" ry="8" fill="#8B5A2B"/>
+    <path d="M128 168 Q128 148 160 146 Q192 148 192 168" fill="#A66B35"/>
+    <ellipse cx="160" cy="154" rx="22" ry="10" fill="#A66B35"/>
+    <path d="M138 152 Q160 146 182 152" fill="none" stroke="#6B4420" stroke-width="2.5" stroke-linecap="round"/>
+    <ellipse cx="160" cy="148" rx="14" ry="6" fill="#8B5A2B"/>
+  </g>
+
+  <!-- Mustache -->
+  <path d="M132 180 Q146 172 160 178 Q174 172 188 180 Q174 192 160 186 Q146 192 132 180 Z" fill="#3D2B1F"/>
+
+  <!-- Small body stump -->
+  <path d="M152 188 L160 208 L168 188 Z" fill="#5A6B4A"/>
+
+  <!-- Wordmark -->
+  <text x="160" y="248" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="36" font-weight="700" fill="#3D2B1F" letter-spacing="2">PINE FLATS</text>
+  <text x="160" y="276" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="14" font-weight="600" fill="#5A6B4A" letter-spacing="4">— RV PARK —</text>
+</svg>

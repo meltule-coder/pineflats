@@ -509,6 +509,31 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     }
   };
 
+  const handleRemoveTenant = async () => {
+    if (!selectedSlot) return;
+    const name = selectedSlot.tenantName || selectedSlot.contactName || contactForm.contactName || 'this tenant';
+    if (!window.confirm(`Remove ${name} from ${selectedSlot.label}? This frees the site and deletes the tenant record.`)) {
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/api/slots/${selectedSlot.id}/remove-tenant`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setSelectedSlot(data.slot ?? null);
+        await loadSlots();
+        onUpdate();
+        if (data.slot) {
+          await loadContactForm(data.slot);
+        } else {
+          setSelectedSlot(null);
+        }
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleAddTenant = async () => {
     if (!selectedSlot || !contactForm.contactName.trim()) return;
     setIsLoading(true);
@@ -960,7 +985,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                       Returning Customer
                     </h4>
                     <p className="text-xs text-[#5A6355] mb-4">
-                      Available sites do not store contact info. Select a returning customer from Settings, or add customers under <strong>Settings → Returning Customers</strong>.
+                      Available sites do not store contact info. Select a returning customer, or add customers under <strong>Bookings → Returning Customers</strong>.
                     </p>
                     <select
                       value={selectedCustomerId}
@@ -1136,6 +1161,16 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                     >
                       <UserPlus className="w-4 h-4" />
                       Add as Tenant
+                    </button>
+                  )}
+                  {(selectedSlot.status === 'occupied' || selectedSlot.tenantId || selectedSlot.tenantName) && (
+                    <button
+                      onClick={handleRemoveTenant}
+                      disabled={isLoading}
+                      className="flex-1 flex items-center justify-center gap-2 bg-white border border-red-300 text-red-700 px-5 py-3 rounded-xl text-sm font-semibold hover:bg-red-50 transition disabled:opacity-50"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Remove Tenant
                     </button>
                   )}
                 </div>

@@ -1,8 +1,12 @@
-import { useEffect, useState } from 'react';
-import { Photo, Tenant, RentalType, Slot, ParkContact, BookingContactInfo } from '../../types';
+import { useEffect, useState, type FormEvent } from 'react';
+import { Photo, RentalType, Slot, ParkContact, BookingContactInfo, CustomerComment } from '../../types';
+
+/** Public availability only — never includes guest/tenant contact fields */
+const PUBLIC_HEADERS = { 'X-Pineflats-Client': 'public-website' };
 import { DEFAULT_CONTACT } from '../../contactDefaults';
 import {
-  ArrowLeft, Map, Calendar, Phone, Mail, CheckCircle2, Sun, Clock, Home, MapPin
+  ArrowLeft, Map, Calendar, Phone, Mail, CheckCircle2, Sun, Clock, Home, MapPin,
+  MessageSquare, X, Send, Star
 } from 'lucide-react';
 import {
   WEEKLY_RENT, MONTHLY_RENT, DAILY_RENT_WEEKDAY, DAILY_RENT_WEEKEND,
@@ -48,7 +52,7 @@ const RENTAL_OPTIONS: {
     type: 'monthly',
     label: 'Monthly',
     price: formatCurrency(MONTHLY_RENT),
-    detail: 'Per month · long-term stay',
+    detail: 'Per month · $750; partial stays prorated by month length',
     icon: Home,
   },
 ];
@@ -59,14 +63,14 @@ function phoneHref(phone: string) {
 }
 
 export function PublicWebsite({
-  photos,
-  tenants,
-  availableSpots,
+  photos: initialPhotos,
+  availableSpots: initialAvailable,
   contact = DEFAULT_CONTACT,
   onBack,
 }: {
   photos: Photo[];
-  tenants: Tenant[];
+  /** @deprecated unused — availability loads from public API only */
+  tenants?: unknown;
   availableSpots: number;
   contact?: ParkContact;
   onBack: () => void;
@@ -75,25 +79,110 @@ export function PublicWebsite({
   const [checkIn, setCheckIn] = useState<string | null>(null);
   const [checkOut, setCheckOut] = useState<string | null>(null);
   const [availableSlots, setAvailableSlots] = useState<Slot[]>([]);
+  const [availableSpots, setAvailableSpots] = useState(initialAvailable);
+  const [photos, setPhotos] = useState<Photo[]>(initialPhotos);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [bookingStep, setBookingStep] = useState<BookingStep>('browse');
   const [bookingContact, setBookingContact] = useState<BookingContactInfo | null>(null);
-  const coverPhoto = photos.length > 0 ? photos[0].url : 'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=2000';
+  const [contactInfo, setContactInfo] = useState<ParkContact>(contact);
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [comments, setComments] = useState<CustomerComment[]>([]);
+  const [commentName, setCommentName] = useState('');
+  const [commentText, setCommentText] = useState('');
+  const [commentRating, setCommentRating] = useState(5);
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
+  const [commentError, setCommentError] = useState('');
+  const [commentSuccess, setCommentSuccess] = useState(false);
+  const imagePhotos = photos.filter(p => p.mediaType !== 'video');
+  const galleryMedia = photos.filter(p => {
+    // Hero uses first image; gallery shows remaining images + all videos
+    if (p.mediaType === 'video') return true;
+    return imagePhotos[0]?.id !== p.id;
+  });
+  const coverPhoto =
+    imagePhotos[0]?.url
+    || 'https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?auto=format&fit=crop&q=80&w=2000';
+
+  const loadComments = () => {
+    fetch('/api/comments', { headers: PUBLIC_HEADERS })
+      .then(res => (res.ok ? res.json() : []))
+      .then((data: CustomerComment[]) => setComments(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    // Public site bundle only — no tenants, customers, or private slot contact data
+    fetch('/api/public/site', { headers: PUBLIC_HEADERS })
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (!data) return;
+        if (data.contact) setContactInfo(data.contact);
+        if (data.photos) setPhotos(data.photos);
+        if (data.availability) {
+          setAvailableSpots(data.availability.available ?? 0);
+          const slots = (data.availability.slots ?? []) as Slot[];
+          setAvailableSlots(slots);
+          setSelectedSiteId(prev => (prev && slots.some(s => s.id === prev) ? prev : null));
+        }
+      })
+      .catch(() => {});
+    loadComments();
+  }, []);
+
+  const submitComment = async (e: FormEvent) => {
+    e.preventDefault();
+    setCommentError('');
+    setCommentSuccess(false);
+    if (!commentName.trim() || !commentText.trim()) {
+      setCommentError('Please enter your name and a comment.');
+      return;
+    }
+    setCommentSubmitting(true);
+    try {
+      const res = await fetch('/api/comments', {
+        method: 'POST',
+        headers: { ...PUBLIC_HEADERS, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: commentName.trim(),
+          comment: commentText.trim(),
+          rating: commentRating,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setCommentError(data.error || 'Could not post comment. Try again.');
+        return;
+      }
+      const created = await res.json();
+      setComments(prev => [created, ...prev]);
+      setCommentName('');
+      setCommentText('');
+      setCommentRating(5);
+      setCommentSuccess(true);
+      setTimeout(() => setCommentSuccess(false), 3000);
+    } catch {
+      setCommentError('Could not post comment. Try again.');
+    } finally {
+      setCommentSubmitting(false);
+    }
+  };
 
   const selectedOption = RENTAL_OPTIONS.find(o => o.type === selectedRental);
   const selectedSite = availableSlots.find(s => s.id === selectedSiteId) ?? null;
   const canBook = !!selectedRental && !!checkIn && !!checkOut && !!selectedSiteId;
 
-  useEffect(() => {
-    fetch('/api/slots')
-      .then(res => res.ok ? res.json() : Promise.reject())
+  const refreshAvailability = () => {
+    fetch('/api/public/availability', { headers: PUBLIC_HEADERS })
+      .then(res => (res.ok ? res.json() : null))
       .then(data => {
-        const slots = (data.slots as Slot[]).filter(s => s.status === 'available');
+        if (!data) return;
+        setAvailableSpots(data.available ?? 0);
+        const slots = (data.slots ?? []) as Slot[];
         setAvailableSlots(slots);
         setSelectedSiteId(prev => (prev && slots.some(s => s.id === prev) ? prev : null));
       })
-      .catch(console.error);
-  }, []);
+      .catch(() => {});
+  };
 
   const bookButtonLabel = !selectedRental
     ? 'Select a Rental Type Above'
@@ -112,6 +201,7 @@ export function PublicWebsite({
   if (bookingStep === 'contact' && selectedRental && selectedSite && checkIn && checkOut) {
     return (
       <BookingContactPage
+        slotId={selectedSite.id}
         siteLabel={selectedSite.label}
         rentalLabel={selectedOption?.label ?? selectedRental}
         rentalType={selectedRental}
@@ -141,6 +231,8 @@ export function PublicWebsite({
         onComplete={() => {
           setBookingStep('confirmed');
           setAvailableSlots(prev => prev.filter(s => s.id !== selectedSite.id));
+          setAvailableSpots(n => Math.max(0, n - 1));
+          refreshAvailability();
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }}
       />
@@ -178,7 +270,18 @@ export function PublicWebsite({
 
   return (
     <div className="min-h-screen bg-white font-sans text-gray-800 flex flex-col relative w-full overflow-y-auto">
-      <div className="fixed top-4 left-4 z-50">
+      <div className="fixed top-4 left-4 z-50 flex flex-col items-start gap-2">
+        <div className="flex items-center gap-2 bg-white/95 backdrop-blur-md border border-[#E2D9D0] rounded-2xl px-3 py-2 shadow-lg">
+          <img
+            src="/logo.svg"
+            alt="Pine Flats logo"
+            className="h-12 w-12 object-contain rounded-lg"
+          />
+          <div className="leading-tight">
+            <p className="text-sm font-serif italic font-bold text-[#5A6355]">Pine Flats</p>
+            <p className="text-[9px] uppercase tracking-widest text-[#5A6355] opacity-70">RV Park</p>
+          </div>
+        </div>
         <button
           onClick={onBack}
           className="flex items-center gap-2 bg-[#5A6355] text-white px-4 py-2 rounded-full shadow-lg hover:bg-[#3D3730] transition border border-[#E2D9D0]"
@@ -186,6 +289,154 @@ export function PublicWebsite({
           <ArrowLeft className="w-4 h-4" />
           <span className="text-sm font-medium">Return to Dashboard</span>
         </button>
+      </div>
+
+      <div className="fixed top-4 right-4 z-50 flex flex-col items-end gap-2 max-w-[min(100vw-2rem,22rem)]">
+        <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center sm:gap-2 flex-wrap justify-end">
+          {contactInfo.phone && (
+            <a
+              href={phoneHref(contactInfo.phone)}
+              className="flex items-center gap-2 bg-[#5A6355]/95 backdrop-blur-md border border-[#E2D9D0] text-white px-4 py-2 rounded-full text-sm font-medium shadow-lg hover:bg-[#3D3730] transition"
+            >
+              <Phone className="w-4 h-4 shrink-0" />
+              <span>{contactInfo.phone}</span>
+            </a>
+          )}
+          {contactInfo.email && (
+            <a
+              href={`mailto:${contactInfo.email}`}
+              className="flex items-center gap-2 bg-[#5A6355]/95 backdrop-blur-md border border-[#E2D9D0] text-white px-4 py-2 rounded-full text-sm font-medium shadow-lg hover:bg-[#3D3730] transition"
+            >
+              <Mail className="w-4 h-4 shrink-0" />
+              <span className="max-w-[160px] truncate sm:max-w-none">{contactInfo.email}</span>
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={() => setCommentsOpen(open => !open)}
+            className={`flex items-center gap-2 backdrop-blur-md border px-4 py-2 rounded-full text-sm font-medium shadow-lg transition ${
+              commentsOpen
+                ? 'bg-[#C29474] border-[#C29474] text-white'
+                : 'bg-[#5A6355]/95 border-[#E2D9D0] text-white hover:bg-[#3D3730]'
+            }`}
+            aria-expanded={commentsOpen}
+            aria-label="Customer comments"
+          >
+            <MessageSquare className="w-4 h-4 shrink-0" />
+            <span>Comments</span>
+            {comments.length > 0 && (
+              <span className="bg-white/25 text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[1.25rem] text-center">
+                {comments.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {commentsOpen && (
+          <div className="w-full sm:w-[22rem] bg-white/95 backdrop-blur-md border border-[#E2D9D0] rounded-2xl shadow-2xl overflow-hidden text-[#3D3730]">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#E2D9D0] bg-[#F7F3F0]">
+              <div>
+                <h3 className="text-sm font-serif font-semibold">Guest Comments</h3>
+                <p className="text-[11px] text-[#5A6355]">Share your experience at Pine Flats</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCommentsOpen(false)}
+                className="p-1.5 rounded-full hover:bg-[#E2D9D0] transition"
+                aria-label="Close comments"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="max-h-48 overflow-y-auto px-4 py-3 space-y-3 bg-white">
+              {comments.length === 0 ? (
+                <p className="text-xs text-[#5A6355] text-center py-4">
+                  No comments yet — be the first to leave one!
+                </p>
+              ) : (
+                comments.slice(0, 20).map(c => (
+                  <div key={c.id} className="rounded-xl border border-[#F0EBE6] bg-[#FBF9F7] p-3">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="text-xs font-semibold truncate">{c.name}</span>
+                      {c.rating != null && (
+                        <span className="flex items-center gap-0.5 shrink-0">
+                          {Array.from({ length: 5 }, (_, i) => (
+                            <Star
+                              key={i}
+                              className={`w-3 h-3 ${i < (c.rating ?? 0) ? 'text-[#C29474] fill-[#C29474]' : 'text-[#E2D9D0]'}`}
+                            />
+                          ))}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-[#5A6355] leading-relaxed whitespace-pre-wrap">{c.comment}</p>
+                    {c.createdAt && (
+                      <p className="text-[10px] text-[#A8B2A6] mt-1.5">
+                        {new Date(c.createdAt).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })}
+                      </p>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+
+            <form onSubmit={submitComment} className="px-4 py-3 border-t border-[#E2D9D0] bg-[#F7F3F0] space-y-2.5">
+              <input
+                type="text"
+                value={commentName}
+                onChange={e => setCommentName(e.target.value)}
+                placeholder="Your name"
+                maxLength={80}
+                className="w-full rounded-xl border border-[#E2D9D0] bg-white px-3 py-2 text-sm outline-none focus:border-[#C29474] focus:ring-1 focus:ring-[#C29474]/40"
+              />
+              <textarea
+                value={commentText}
+                onChange={e => setCommentText(e.target.value)}
+                placeholder="Write a comment..."
+                rows={3}
+                maxLength={1000}
+                className="w-full rounded-xl border border-[#E2D9D0] bg-white px-3 py-2 text-sm outline-none resize-none focus:border-[#C29474] focus:ring-1 focus:ring-[#C29474]/40"
+              />
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1" role="group" aria-label="Rating">
+                  {Array.from({ length: 5 }, (_, i) => {
+                    const value = i + 1;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setCommentRating(value)}
+                        className="p-0.5"
+                        aria-label={`${value} star${value === 1 ? '' : 's'}`}
+                      >
+                        <Star
+                          className={`w-4 h-4 transition ${
+                            value <= commentRating ? 'text-[#C29474] fill-[#C29474]' : 'text-[#E2D9D0]'
+                          }`}
+                        />
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="submit"
+                  disabled={commentSubmitting}
+                  className="flex items-center gap-1.5 bg-[#C29474] text-white px-3 py-1.5 rounded-full text-xs font-semibold hover:bg-[#A87A5C] transition disabled:opacity-50"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  {commentSubmitting ? 'Posting…' : 'Post'}
+                </button>
+              </div>
+              {commentError && <p className="text-[11px] text-red-600">{commentError}</p>}
+              {commentSuccess && <p className="text-[11px] text-[#3D5A3D]">Thanks! Your comment was posted.</p>}
+            </form>
+          </div>
+        )}
       </div>
 
       <section className="relative h-[60vh] md:h-[80vh] flex items-center justify-center overflow-hidden">
@@ -261,65 +512,6 @@ export function PublicWebsite({
               <CheckCircle2 className="w-5 h-5" />
               {bookButtonLabel}
             </button>
-          </div>
-        </div>
-      </section>
-
-      <section className="py-16 px-4 bg-[#F7F3F0]">
-        <div className="max-w-4xl mx-auto text-center">
-          <h2 className="text-3xl font-serif text-[#3D3730] mb-3">Rental Rates</h2>
-          <p className="text-[#5A6355] text-sm mb-10">Tap your preferred stay length to select it above, then book your spot.</p>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div className="bg-white rounded-3xl border border-[#E2D9D0] p-6 shadow-sm">
-              <Sun className="w-10 h-10 text-[#C29474] mx-auto mb-3" />
-              <h3 className="text-xl font-serif text-[#3D3730] mb-2">Daily</h3>
-              <p className="text-2xl font-serif text-[#C29474] mb-1">{formatCurrency(DAILY_RENT_WEEKDAY)}</p>
-              <p className="text-xs text-[#5A6355] mb-3">Sunday – Thursday</p>
-              <p className="text-2xl font-serif text-[#C29474] mb-1">{formatCurrency(DAILY_RENT_WEEKEND)}</p>
-              <p className="text-xs text-[#5A6355] mb-4">Friday – Saturday</p>
-              <button
-                onClick={() => setSelectedRental('daily')}
-                className={`w-full py-2.5 rounded-xl text-sm font-semibold transition ${
-                  selectedRental === 'daily'
-                    ? 'bg-[#C29474] text-white'
-                    : 'bg-[#FBF9F7] text-[#5A6355] border border-[#E2D9D0] hover:bg-[#EDE7E1]'
-                }`}
-              >
-                {selectedRental === 'daily' ? 'Selected' : 'Choose Daily'}
-              </button>
-            </div>
-            <div className="bg-white rounded-3xl border border-[#E2D9D0] p-6 shadow-sm">
-              <Clock className="w-10 h-10 text-[#C29474] mx-auto mb-3" />
-              <h3 className="text-xl font-serif text-[#3D3730] mb-2">Weekly</h3>
-              <p className="text-3xl font-serif text-[#C29474] mb-2">{formatCurrency(WEEKLY_RENT)}</p>
-              <p className="text-xs text-[#5A6355] mb-4">Per week · prorated beyond 7 nights</p>
-              <button
-                onClick={() => setSelectedRental('weekly')}
-                className={`w-full py-2.5 rounded-xl text-sm font-semibold transition ${
-                  selectedRental === 'weekly'
-                    ? 'bg-[#C29474] text-white'
-                    : 'bg-[#FBF9F7] text-[#5A6355] border border-[#E2D9D0] hover:bg-[#EDE7E1]'
-                }`}
-              >
-                {selectedRental === 'weekly' ? 'Selected' : 'Choose Weekly'}
-              </button>
-            </div>
-            <div className="bg-white rounded-3xl border border-[#E2D9D0] p-6 shadow-sm">
-              <Home className="w-10 h-10 text-[#C29474] mx-auto mb-3" />
-              <h3 className="text-xl font-serif text-[#3D3730] mb-2">Monthly</h3>
-              <p className="text-3xl font-serif text-[#C29474] mb-2">{formatCurrency(MONTHLY_RENT)}</p>
-              <p className="text-xs text-[#5A6355] mb-4">Per month</p>
-              <button
-                onClick={() => setSelectedRental('monthly')}
-                className={`w-full py-2.5 rounded-xl text-sm font-semibold transition ${
-                  selectedRental === 'monthly'
-                    ? 'bg-[#C29474] text-white'
-                    : 'bg-[#FBF9F7] text-[#5A6355] border border-[#E2D9D0] hover:bg-[#EDE7E1]'
-                }`}
-              >
-                {selectedRental === 'monthly' ? 'Selected' : 'Choose Monthly'}
-              </button>
-            </div>
           </div>
         </div>
       </section>
@@ -434,14 +626,37 @@ export function PublicWebsite({
         </div>
       </section>
 
-      {photos.length > 1 && (
+      {galleryMedia.length > 0 && (
         <section className="py-20 px-4 bg-[#F7F3F0]">
           <div className="max-w-7xl mx-auto">
-            <h2 className="text-3xl font-serif text-[#3D3730] mb-12 text-center">Our Park</h2>
+            <h2 className="text-3xl font-serif text-[#3D3730] mb-4 text-center">Our Park</h2>
+            <p className="text-sm text-[#5A6355] text-center mb-12">Photos and videos from Pine Flats</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-              {photos.slice(1).map((photo) => (
-                <div key={photo.id} className="aspect-[4/3] rounded-2xl overflow-hidden bg-gray-200">
-                  <img src={photo.url} alt={photo.caption} className="w-full h-full object-cover hover:scale-105 transition-transform duration-500" />
+              {galleryMedia.map((item) => (
+                <div key={item.id} className="rounded-2xl overflow-hidden bg-gray-200 shadow-sm border border-[#E2D9D0]">
+                  <div className="aspect-[4/3] w-full bg-black/5">
+                    {item.mediaType === 'video' ? (
+                      <video
+                        src={item.url}
+                        className="w-full h-full object-cover"
+                        controls
+                        playsInline
+                        preload="metadata"
+                        title={item.caption}
+                      >
+                        Your browser does not support video playback.
+                      </video>
+                    ) : (
+                      <img
+                        src={item.url}
+                        alt={item.caption}
+                        className="w-full h-full object-cover hover:scale-105 transition-transform duration-500"
+                      />
+                    )}
+                  </div>
+                  {item.caption && (
+                    <p className="px-4 py-3 text-sm text-[#5A6355] bg-white">{item.caption}</p>
+                  )}
                 </div>
               ))}
             </div>
@@ -453,22 +668,22 @@ export function PublicWebsite({
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
           <div className="text-center md:text-left">
             <h3 className="text-2xl font-serif italic text-white mb-2">Pine Flats RV Park</h3>
-            <p className="text-sm opacity-60">{contact.tagline || DEFAULT_CONTACT.tagline}</p>
-            {contact.address && (
-              <p className="text-xs opacity-50 mt-2">{contact.address}</p>
+            <p className="text-sm opacity-60">{contactInfo.tagline || DEFAULT_CONTACT.tagline}</p>
+            {contactInfo.address && (
+              <p className="text-xs opacity-50 mt-2">{contactInfo.address}</p>
             )}
           </div>
           <div className="flex flex-wrap justify-center gap-6">
-            {contact.email && (
-              <a href={`mailto:${contact.email}`} className="flex items-center gap-2 hover:text-white transition">
+            {contactInfo.email && (
+              <a href={`mailto:${contactInfo.email}`} className="flex items-center gap-2 hover:text-white transition">
                 <Mail className="w-4 h-4" />
-                {contact.contactName || contact.email}
+                {contactInfo.contactName || contactInfo.email}
               </a>
             )}
-            {contact.phone && (
-              <a href={phoneHref(contact.phone)} className="flex items-center gap-2 hover:text-white transition">
+            {contactInfo.phone && (
+              <a href={phoneHref(contactInfo.phone)} className="flex items-center gap-2 hover:text-white transition">
                 <Phone className="w-4 h-4" />
-                {contact.phone}
+                {contactInfo.phone}
               </a>
             )}
           </div>

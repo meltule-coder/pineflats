@@ -115,12 +115,47 @@ export function clearSlotByTenant(tenantName: string): boolean {
   let changed = false;
   for (const slot of slots) {
     if (slot.tenantName?.toLowerCase().includes(tenantName.toLowerCase())) {
-      slot.status = 'available';
-      slot.tenantName = undefined;
-      slot.tenantId = undefined;
-      slot.startDate = undefined;
-      slot.endDate = undefined;
-      slot.notes = undefined;
+      Object.assign(slot, SLOT_CONTACT_CLEAR, {
+        status: 'available' as SlotStatus,
+        paymentMethod: undefined,
+        bookedAt: undefined,
+      });
+      changed = true;
+    }
+  }
+  if (changed) saveSlots(slots);
+  return changed;
+}
+
+export function clearSlotByTenantId(tenantId: string): boolean {
+  const slots = getSlots();
+  let changed = false;
+  for (const slot of slots) {
+    if (slot.tenantId === tenantId) {
+      Object.assign(slot, SLOT_CONTACT_CLEAR, {
+        status: 'available' as SlotStatus,
+        paymentMethod: undefined,
+        bookedAt: undefined,
+      });
+      changed = true;
+    }
+  }
+  if (changed) saveSlots(slots);
+  return changed;
+}
+
+export function clearSlotBySiteNumber(site: string | number): boolean {
+  const num = String(site).replace(/\D/g, '');
+  if (!num) return false;
+  const slots = getSlots();
+  let changed = false;
+  for (const slot of slots) {
+    if (String(slot.number) === num) {
+      Object.assign(slot, SLOT_CONTACT_CLEAR, {
+        status: 'available' as SlotStatus,
+        paymentMethod: undefined,
+        bookedAt: undefined,
+      });
       changed = true;
     }
   }

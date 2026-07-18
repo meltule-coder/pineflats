@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { Photo } from '../types';
+import { Photo, MediaType } from '../types';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const PHOTOS_FILE = path.join(DATA_DIR, 'photos.json');
@@ -23,7 +23,11 @@ export function getPhotos(): Photo[] {
     return DEFAULT_PHOTOS;
   }
   const photos = JSON.parse(fs.readFileSync(PHOTOS_FILE, 'utf-8')) as Photo[];
-  return photos.map(p => ({ ...p, published: p.published !== false }));
+  return photos.map(p => ({
+    ...p,
+    published: p.published !== false,
+    mediaType: p.mediaType === 'video' ? 'video' as const : 'image' as const,
+  }));
 }
 
 export function getPublishedPhotos(): Photo[] {
@@ -44,13 +48,22 @@ export function nextPhotoId(): string {
   return String(max + 1);
 }
 
+function isVideoUrl(url: string): boolean {
+  return /\.(mp4|webm|ogg|mov)(\?|$)/i.test(url) || url.includes('youtube.com') || url.includes('youtu.be') || url.includes('vimeo.com');
+}
+
 export function addPhoto(photo: Omit<Photo, 'id'> & { id?: string }): Photo {
   const photos = getPhotos();
+  const mediaType: MediaType =
+    photo.mediaType === 'video' || (!photo.mediaType && isVideoUrl(photo.url))
+      ? 'video'
+      : 'image';
   const newPhoto: Photo = {
     id: photo.id ?? nextPhotoId(),
     url: photo.url,
-    caption: photo.caption || 'Park Photo',
+    caption: photo.caption || (mediaType === 'video' ? 'Park Video' : 'Park Photo'),
     published: photo.published !== false,
+    mediaType,
   };
   photos.push(newPhoto);
   savePhotos(photos);

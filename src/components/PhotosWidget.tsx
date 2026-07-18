@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Upload, Link as LinkIcon, Globe, GlobeLock, Trash2, ChevronUp, ChevronDown, ImagePlus, Pencil, Check, X
+  Upload, Link as LinkIcon, Globe, GlobeLock, Trash2, ChevronUp, ChevronDown,
+  ImagePlus, Pencil, Check, X, Video
 } from 'lucide-react';
 import { Photo } from '../../types';
+
+function isVideo(photo: Photo) {
+  return photo.mediaType === 'video';
+}
 
 export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
   const [photos, setPhotos] = useState<Photo[]>([]);
@@ -11,6 +16,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
   const [addMode, setAddMode] = useState<'upload' | 'url'>('upload');
   const [urlInput, setUrlInput] = useState('');
   const [captionInput, setCaptionInput] = useState('');
+  const [urlIsVideo, setUrlIsVideo] = useState(false);
   const [publishOnAdd, setPublishOnAdd] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editCaption, setEditCaption] = useState('');
@@ -32,7 +38,8 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
     try {
       const form = new FormData();
       form.append('photo', file);
-      form.append('caption', captionInput.trim() || 'Park Photo');
+      const isVid = file.type.startsWith('video/');
+      form.append('caption', captionInput.trim() || (isVid ? 'Park Video' : 'Park Photo'));
       form.append('published', publishOnAdd ? 'true' : 'false');
       const res = await fetch('/api/photos/upload', { method: 'POST', body: form });
       if (res.ok) {
@@ -61,8 +68,9 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: urlInput.trim(),
-          caption: captionInput.trim() || 'Park Photo',
+          caption: captionInput.trim() || (urlIsVideo ? 'Park Video' : 'Park Photo'),
           published: publishOnAdd,
+          mediaType: urlIsVideo ? 'video' : 'image',
         }),
       });
       if (res.ok) {
@@ -70,6 +78,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
         onUpdate();
         setUrlInput('');
         setCaptionInput('');
+        setUrlIsVideo(false);
         setShowAddForm(false);
       }
     } finally {
@@ -93,7 +102,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
     const res = await fetch(`/api/photos/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ caption: editCaption.trim() || 'Park Photo' }),
+      body: JSON.stringify({ caption: editCaption.trim() || 'Park media' }),
     });
     if (res.ok) {
       await loadPhotos();
@@ -103,7 +112,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
   };
 
   const removePhoto = async (id: string) => {
-    if (!confirm('Remove this photo from the library?')) return;
+    if (!confirm('Remove this item from the library?')) return;
     const res = await fetch(`/api/photos/${id}`, { method: 'DELETE' });
     if (res.ok) {
       await loadPhotos();
@@ -128,14 +137,16 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
   };
 
   const publishedCount = photos.filter(p => p.published !== false).length;
+  const videoCount = photos.filter(p => isVideo(p)).length;
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h2 className="text-xl font-serif text-[#3D3730]">Website Photos</h2>
+          <h2 className="text-xl font-serif text-[#3D3730]">Website Photos &amp; Videos</h2>
           <p className="text-sm text-[#5A6355] mt-1">
-            {publishedCount} of {photos.length} photo{photos.length === 1 ? '' : 's'} live on the public website
+            {publishedCount} of {photos.length} item{photos.length === 1 ? '' : 's'} live
+            {videoCount > 0 ? ` · ${videoCount} video${videoCount === 1 ? '' : 's'}` : ''}
           </p>
         </div>
         <button
@@ -143,7 +154,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
           className="flex items-center gap-2 bg-[#C29474] text-white rounded-xl px-4 py-2 text-sm font-semibold shadow-lg shadow-black/10 transition-transform active:scale-95"
         >
           <ImagePlus className="w-4 h-4" />
-          Add Photo
+          Add Media
         </button>
       </div>
 
@@ -155,7 +166,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
 
       {showAddForm && (
         <div className="bg-white rounded-[32px] border border-[#E2D9D0] p-6 shadow-sm space-y-5">
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <button
               onClick={() => setAddMode('upload')}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition ${
@@ -172,7 +183,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
               }`}
             >
               <LinkIcon className="w-4 h-4" />
-              Image URL
+              Media URL
             </button>
           </div>
 
@@ -181,7 +192,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
             <input
               value={captionInput}
               onChange={e => setCaptionInput(e.target.value)}
-              placeholder="e.g. Main entrance at sunset"
+              placeholder="e.g. Park tour, Main entrance"
               className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
             />
           </div>
@@ -201,23 +212,36 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                accept="image/*,video/mp4,video/webm,video/quicktime,video/ogg"
                 onChange={e => {
                   const file = e.target.files?.[0];
                   if (file) handleUpload(file);
                 }}
                 className="block w-full text-sm text-[#5A6355] file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-[#EDE7E1] file:text-[#3D3730] file:font-medium hover:file:bg-[#E2D9D0]"
               />
-              <p className="text-xs text-[#5A6355]">JPG, PNG, or WebP up to 10 MB. First published photo becomes the website hero image.</p>
+              <p className="text-xs text-[#5A6355]">
+                Photos: JPG, PNG, WebP up to 10 MB. Videos: MP4, WebM, MOV up to 100 MB.
+                First published <strong>photo</strong> is the hero banner (videos appear in the gallery).
+              </p>
+              {isLoading && <p className="text-xs text-[#C29474]">Uploading… large videos may take a moment.</p>}
             </div>
           ) : (
             <div className="space-y-3">
               <input
                 value={urlInput}
                 onChange={e => setUrlInput(e.target.value)}
-                placeholder="https://example.com/photo.jpg"
+                placeholder="https://example.com/video.mp4 or image URL"
                 className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
               />
+              <label className="flex items-center gap-2 text-sm text-[#5A6355] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={urlIsVideo}
+                  onChange={e => setUrlIsVideo(e.target.checked)}
+                  className="rounded border-[#E2D9D0]"
+                />
+                This URL is a video file (mp4/webm)
+              </label>
               <button
                 onClick={handleAddUrl}
                 disabled={isLoading || !urlInput.trim()}
@@ -232,13 +256,15 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
 
       <div className="bg-[#5A6355] text-[#F7F3F0] rounded-[32px] p-6 shadow-sm">
         <p className="text-xs text-[#F7F3F0]/70 mb-4">
-          Use arrows to reorder. The first published photo is the hero banner on the public site.
+          Use arrows to reorder. The first published photo is the hero banner. Videos show in the “Our Park” gallery.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {photos.map((p, index) => {
             const isPublished = p.published !== false;
             const isEditing = editingId === p.id;
-            const isHero = isPublished && photos.filter(x => x.published !== false)[0]?.id === p.id;
+            const publishedImages = photos.filter(x => x.published !== false && !isVideo(x));
+            const isHero = isPublished && !isVideo(p) && publishedImages[0]?.id === p.id;
+            const video = isVideo(p);
 
             return (
               <div
@@ -247,16 +273,32 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
                   isPublished ? 'border-[#C29474]/50' : 'border-white/20 opacity-80'
                 }`}
               >
-                <div className="aspect-[4/3] w-full overflow-hidden bg-white/10 relative">
-                  <img
-                    src={p.url}
-                    alt={p.caption}
-                    className="w-full h-full object-cover"
-                  />
+                <div className="aspect-[4/3] w-full overflow-hidden bg-black/20 relative">
+                  {video ? (
+                    <video
+                      src={p.url}
+                      className="w-full h-full object-cover"
+                      muted
+                      playsInline
+                      preload="metadata"
+                      controls
+                    />
+                  ) : (
+                    <img
+                      src={p.url}
+                      alt={p.caption}
+                      className="w-full h-full object-cover"
+                    />
+                  )}
                   <div className="absolute top-2 left-2 flex flex-col gap-1">
                     {isHero && (
                       <span className="text-[10px] uppercase tracking-wider bg-[#C29474] text-white px-2 py-1 rounded-full font-semibold">
                         Hero
+                      </span>
+                    )}
+                    {video && (
+                      <span className="text-[10px] uppercase tracking-wider bg-[#3D3730] text-white px-2 py-1 rounded-full font-semibold flex items-center gap-1 w-fit">
+                        <Video className="w-3 h-3" /> Video
                       </span>
                     )}
                     <span className={`text-[10px] uppercase tracking-wider px-2 py-1 rounded-full font-semibold ${
@@ -327,7 +369,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
                     <button
                       onClick={() => removePhoto(p.id)}
                       className="p-1.5 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 ml-auto"
-                      aria-label="Delete photo"
+                      aria-label="Delete"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -338,7 +380,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
           })}
           {photos.length === 0 && (
             <div className="col-span-full py-12 text-center text-sm text-[#F7F3F0]/60">
-              No photos yet. Add your first park photo above.
+              No media yet. Add your first park photo or video above.
             </div>
           )}
         </div>

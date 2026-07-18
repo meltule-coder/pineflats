@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Phone, Mail, MapPin, User, Save, Globe } from 'lucide-react';
+import { Phone, Mail, MapPin, User, Save } from 'lucide-react';
 import { ParkContact } from '../../types';
 
 const EMPTY_FORM: ParkContact = {
@@ -67,7 +67,7 @@ export function ContactWidget({ onUpdate }: { onUpdate?: () => void }) {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="max-w-2xl">
         <div className="bg-white rounded-[32px] border border-[#E2D9D0] p-6 shadow-sm space-y-5">
           <h3 className="text-sm font-serif text-[#3D3730] border-b border-[#E2D9D0] pb-2">Contact Details</h3>
 
@@ -132,39 +132,6 @@ export function ContactWidget({ onUpdate }: { onUpdate?: () => void }) {
               placeholder="Your home away from home."
               className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
             />
-          </div>
-        </div>
-
-        <div className="bg-[#3D3730] text-gray-300 rounded-[32px] p-6 shadow-sm">
-          <div className="flex items-center gap-2 mb-4 text-white">
-            <Globe className="w-4 h-4 text-[#C29474]" />
-            <h3 className="text-sm font-serif">Website Preview</h3>
-          </div>
-          <div className="border border-white/10 rounded-2xl p-5 space-y-4">
-            <div>
-              <h4 className="text-xl font-serif italic text-white mb-1">Pine Flats RV Park</h4>
-              <p className="text-sm opacity-60">{form.tagline || 'Your home away from home.'}</p>
-              {form.address && (
-                <p className="text-xs opacity-50 mt-2">{form.address}</p>
-              )}
-            </div>
-            <div className="flex flex-wrap gap-4 text-sm pt-2 border-t border-white/10">
-              {form.email && (
-                <span className="flex items-center gap-2">
-                  <Mail className="w-4 h-4" />
-                  {form.email}
-                </span>
-              )}
-              {form.phone && (
-                <span className="flex items-center gap-2">
-                  <Phone className="w-4 h-4" />
-                  {form.phone}
-                </span>
-              )}
-            </div>
-            {form.contactName && (
-              <p className="text-xs opacity-50">Contact: {form.contactName}</p>
-            )}
           </div>
         </div>
       </div>

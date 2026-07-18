@@ -86,7 +86,7 @@ export function CustomersWidget() {
         <div>
           <h2 className="text-xl font-serif text-[#3D3730]">Returning Customers</h2>
           <p className="text-sm text-[#5A6355] mt-1">
-            Saved in <code className="text-xs bg-[#EDE7E1] px-1.5 py-0.5 rounded">data/customers.json</code> for quick access when assigning available sites.
+            Guest contact info for bookings and site assignments. Not shown on the public website.
           </p>
         </div>
         <button
