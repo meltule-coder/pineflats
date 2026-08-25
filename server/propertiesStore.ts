@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { Property, PropertyRentalRates, RentalType } from '../types';
 import { getAllowedRentalTypes } from '../rentUtils';
+import { atomicWriteJson } from './persist';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const PROPERTIES_FILE = path.join(DATA_DIR, 'properties.json');
@@ -11,6 +12,8 @@ export const DEFAULT_RENTAL_RATES: PropertyRentalRates = {
   weekly: 250,
   dailyWeekday: 49.99,
   dailyWeekend: 59.99,
+  stateTransientTaxPercent: 0,
+  countyTransientTaxPercent: 0,
   notes: '',
 };
 
@@ -23,7 +26,7 @@ const DEFAULT_PROPERTIES: Property[] = [
     state: '',
     zip: '',
     phone: '555-0199',
-    email: 'info@pineflatsrv.com',
+    email: 'info@pineflatsrvpark.com',
     totalSites: 25,
     notes: 'Primary property',
     rentalRates: { ...DEFAULT_RENTAL_RATES },
@@ -41,7 +44,7 @@ function ensureDataDir() {
 export function getProperties(): Property[] {
   ensureDataDir();
   if (!fs.existsSync(PROPERTIES_FILE)) {
-    fs.writeFileSync(PROPERTIES_FILE, JSON.stringify(DEFAULT_PROPERTIES, null, 2));
+    atomicWriteJson(PROPERTIES_FILE, DEFAULT_PROPERTIES);
     return DEFAULT_PROPERTIES.map(p => ({ ...p }));
   }
   const raw = JSON.parse(fs.readFileSync(PROPERTIES_FILE, 'utf-8')) as Property[];
@@ -57,7 +60,7 @@ export function getProperties(): Property[] {
 
 function saveProperties(properties: Property[]) {
   ensureDataDir();
-  fs.writeFileSync(PROPERTIES_FILE, JSON.stringify(properties, null, 2));
+  atomicWriteJson(PROPERTIES_FILE, properties);
 }
 
 function nextId(): string {
@@ -82,6 +85,15 @@ function parsePositiveMoney(value: unknown, fallback: number): number {
   return Math.round(n * 100) / 100;
 }
 
+/** Tax percent 0–100 (allows decimals like 1.8). */
+function parseTaxPercent(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (Number.isNaN(n) || n < 0) return fallback;
+  // Cap at 100% to avoid typos creating 1000% tax
+  const capped = Math.min(n, 100);
+  return Math.round(capped * 1000) / 1000;
+}
+
 export function normalizeRentalRates(
   input?: Partial<PropertyRentalRates> | null,
   base: PropertyRentalRates = DEFAULT_RENTAL_RATES
@@ -91,6 +103,14 @@ export function normalizeRentalRates(
     weekly: parsePositiveMoney(input?.weekly, base.weekly),
     dailyWeekday: parsePositiveMoney(input?.dailyWeekday, base.dailyWeekday),
     dailyWeekend: parsePositiveMoney(input?.dailyWeekend, base.dailyWeekend),
+    stateTransientTaxPercent: parseTaxPercent(
+      input?.stateTransientTaxPercent,
+      base.stateTransientTaxPercent ?? 0
+    ),
+    countyTransientTaxPercent: parseTaxPercent(
+      input?.countyTransientTaxPercent,
+      base.countyTransientTaxPercent ?? 0
+    ),
     notes: (input?.notes ?? base.notes ?? '').toString().trim() || undefined,
   };
 }

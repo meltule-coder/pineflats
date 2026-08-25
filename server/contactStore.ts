@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ParkContact } from '../types';
 import { DEFAULT_CONTACT } from '../contactDefaults';
+import { atomicWriteJson } from './persist';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
@@ -20,7 +21,7 @@ function loadConfig(): Record<string, unknown> {
 
 function saveConfig(config: Record<string, unknown>) {
   ensureDataDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  atomicWriteJson(CONFIG_FILE, config);
 }
 
 export function getContactInfo(): ParkContact {
@@ -37,6 +38,9 @@ export function updateContactInfo(updates: Partial<ParkContact>): ParkContact {
     contactName: (updates.contactName ?? current.contactName).trim(),
     address: (updates.address ?? current.address ?? '').trim(),
     tagline: (updates.tagline ?? current.tagline).trim(),
+    businessName: (updates.businessName ?? current.businessName ?? DEFAULT_CONTACT.businessName ?? '').trim(),
+    logoUrl: (updates.logoUrl ?? current.logoUrl ?? DEFAULT_CONTACT.logoUrl ?? '/logo.png').trim() || '/logo.png',
+    about: (updates.about ?? current.about ?? DEFAULT_CONTACT.about ?? '').trim(),
   };
   const config = loadConfig();
   config.contact = next;

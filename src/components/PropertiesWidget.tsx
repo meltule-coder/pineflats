@@ -4,6 +4,9 @@ import {
 } from 'lucide-react';
 import { Property, PropertyRentalRates } from '../../types';
 import { DEFAULT_RENTAL_RATES, getAllowedRentalTypes } from '../../rentUtils';
+import { notifyActiveRatesChanged } from '../lib/activeRates';
+
+const fetchOpts: RequestInit = { credentials: 'include' };
 
 const EMPTY = {
   name: '',
@@ -23,6 +26,8 @@ const EMPTY_RATES = {
   weekly: String(DEFAULT_RENTAL_RATES.weekly),
   dailyWeekday: String(DEFAULT_RENTAL_RATES.dailyWeekday),
   dailyWeekend: String(DEFAULT_RENTAL_RATES.dailyWeekend),
+  stateTransientTaxPercent: String(DEFAULT_RENTAL_RATES.stateTransientTaxPercent ?? 0),
+  countyTransientTaxPercent: String(DEFAULT_RENTAL_RATES.countyTransientTaxPercent ?? 0),
   notes: '',
 };
 
@@ -32,6 +37,12 @@ function ratesToForm(rates?: PropertyRentalRates | null) {
     weekly: String(rates?.weekly ?? DEFAULT_RENTAL_RATES.weekly),
     dailyWeekday: String(rates?.dailyWeekday ?? DEFAULT_RENTAL_RATES.dailyWeekday),
     dailyWeekend: String(rates?.dailyWeekend ?? DEFAULT_RENTAL_RATES.dailyWeekend),
+    stateTransientTaxPercent: String(
+      rates?.stateTransientTaxPercent ?? DEFAULT_RENTAL_RATES.stateTransientTaxPercent ?? 0
+    ),
+    countyTransientTaxPercent: String(
+      rates?.countyTransientTaxPercent ?? DEFAULT_RENTAL_RATES.countyTransientTaxPercent ?? 0
+    ),
     notes: rates?.notes ?? '',
   };
 }
@@ -49,18 +60,23 @@ export function PropertiesWidget() {
   const [message, setMessage] = useState<string | null>(null);
 
   const loadProperties = async () => {
-    const res = await fetch('/api/properties');
-    if (!res.ok) return;
+    const res = await fetch('/api/properties', fetchOpts);
+    if (!res.ok) {
+      if (res.status === 401) {
+        setError('Admin session expired. Sign in again to manage properties and rates.');
+      }
+      return;
+    }
     const list: Property[] = await res.json();
     setProperties(list);
-    const active = list.find(p => p.isActive) ?? list[0] ?? null;
-    if (active) {
-      setRatesPropertyId(active.id);
-      setRatesForm(ratesToForm(active.rentalRates));
-    } else {
-      setRatesPropertyId(null);
-      setRatesForm(EMPTY_RATES);
-    }
+    // Keep rates editor on the same property when possible; otherwise active or first
+    setRatesPropertyId((prev) => {
+      const keep = prev && list.some(p => p.id === prev) ? prev : null;
+      const nextId = keep ?? list.find(p => p.isActive)?.id ?? list[0]?.id ?? null;
+      const next = list.find(p => p.id === nextId) ?? null;
+      setRatesForm(ratesToForm(next?.rentalRates));
+      return nextId;
+    });
   };
 
   useEffect(() => {
@@ -124,6 +140,7 @@ export function PropertiesWidget() {
         editingId ? `/api/properties/${editingId}` : '/api/properties',
         {
           method: editingId ? 'PUT' : 'POST',
+          credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         }
@@ -153,14 +170,18 @@ export function PropertiesWidget() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/properties/${id}/activate`, { method: 'POST' });
+      const res = await fetch(`/api/properties/${id}/activate`, {
+        method: 'POST',
+        credentials: 'include',
+      });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setError(data.error || 'Could not set active property');
         return;
       }
       await loadProperties();
-      setMessage('Active property updated.');
+      notifyActiveRatesChanged();
+      setMessage('Active property updated. Rental rates now follow this property.');
       setTimeout(() => setMessage(null), 2500);
     } finally {
       setIsLoading(false);
@@ -172,7 +193,7 @@ export function PropertiesWidget() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/properties/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/properties/${id}`, { method: 'DELETE', credentials: 'include' });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setError(data.error || 'Could not delete property');
@@ -185,64 +206,119 @@ export function PropertiesWidget() {
     }
   };
 
+  const selectRatesProperty = (id: string) => {
+    const property = properties.find(p => p.id === id);
+    setRatesPropertyId(id);
+    setRatesForm(ratesToForm(property?.rentalRates));
+    setError(null);
+  };
+
   const handleSaveRates = async () => {
     if (!ratesPropertyId) {
-      setError('No active property to save rates for.');
+      setError('Select a property to save rates for.');
       return;
     }
-    const active = properties.find(p => p.id === ratesPropertyId);
-    const allowed = getAllowedRentalTypes(active);
-    const body: Record<string, unknown> = {
-      notes: ratesForm.notes.trim(),
-    };
-    if (allowed.includes('monthly')) {
-      const monthly = parseFloat(ratesForm.monthly);
-      if (Number.isNaN(monthly) || monthly < 0) {
-        setError('Enter a valid monthly rate.');
-        return;
+    const target = properties.find(p => p.id === ratesPropertyId);
+    if (!target) {
+      setError('Property not found. Refresh and try again.');
+      return;
+    }
+    const allowed = getAllowedRentalTypes(target);
+    const existing = target.rentalRates ?? DEFAULT_RENTAL_RATES;
+
+    const parseField = (raw: string, label: string): number | null => {
+      const n = parseFloat(raw);
+      if (Number.isNaN(n) || n < 0) {
+        setError(`Enter a valid ${label} rate.`);
+        return null;
       }
-      body.monthly = monthly;
+      return Math.round(n * 100) / 100;
+    };
+
+    // Always persist a full rates object so other types keep prior values.
+    let monthly = existing.monthly;
+    let weekly = existing.weekly;
+    let dailyWeekday = existing.dailyWeekday;
+    let dailyWeekend = existing.dailyWeekend;
+
+    if (allowed.includes('monthly')) {
+      const n = parseField(ratesForm.monthly, 'monthly');
+      if (n === null) return;
+      monthly = n;
     }
     if (allowed.includes('weekly')) {
-      const weekly = parseFloat(ratesForm.weekly);
-      if (Number.isNaN(weekly) || weekly < 0) {
-        setError('Enter a valid weekly rate.');
-        return;
-      }
-      body.weekly = weekly;
+      const n = parseField(ratesForm.weekly, 'weekly');
+      if (n === null) return;
+      weekly = n;
     }
     if (allowed.includes('daily')) {
-      const dailyWeekday = parseFloat(ratesForm.dailyWeekday);
-      const dailyWeekend = parseFloat(ratesForm.dailyWeekend);
-      if ([dailyWeekday, dailyWeekend].some(n => Number.isNaN(n) || n < 0)) {
-        setError('Enter valid daily rates.');
-        return;
-      }
-      body.dailyWeekday = dailyWeekday;
-      body.dailyWeekend = dailyWeekend;
+      const wd = parseField(ratesForm.dailyWeekday, 'weekday daily');
+      const we = parseField(ratesForm.dailyWeekend, 'weekend daily');
+      if (wd === null || we === null) return;
+      dailyWeekday = wd;
+      dailyWeekend = we;
     }
+
+    const parseTax = (raw: string, label: string): number | null => {
+      const n = parseFloat(raw);
+      if (Number.isNaN(n) || n < 0 || n > 100) {
+        setError(`Enter a valid ${label} tax percent (0–100).`);
+        return null;
+      }
+      return Math.round(n * 1000) / 1000;
+    };
+
+    // Transient tax applies to daily & weekly (always stored so it is ready when those types are used)
+    const stateTax = parseTax(ratesForm.stateTransientTaxPercent, 'state transient');
+    if (stateTax === null) return;
+    const countyTax = parseTax(ratesForm.countyTransientTaxPercent, 'county transient');
+    if (countyTax === null) return;
+
+    const body: PropertyRentalRates = {
+      monthly,
+      weekly,
+      dailyWeekday,
+      dailyWeekend,
+      stateTransientTaxPercent: stateTax,
+      countyTransientTaxPercent: countyTax,
+      notes: ratesForm.notes.trim() || undefined,
+    };
+
     setSavingRates(true);
     setError(null);
     setMessage(null);
     try {
       const res = await fetch(`/api/properties/${ratesPropertyId}/rates`, {
         method: 'PUT',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('application/json')) {
-        if (res.status === 404 || contentType.includes('text/html')) {
-          setError('Rates API not loaded. Stop the server and run npm run dev, then try again.');
+        if (res.status === 401) {
+          setError('Admin session expired. Sign in again, then save rates.');
+        } else if (res.status === 404 || contentType.includes('text/html')) {
+          setError('Rates API not loaded. Redeploy or restart the server, then try again.');
         } else {
           const data = await res.json().catch(() => ({}));
           setError(data.error || `Could not save rental rates (${res.status})`);
         }
         return;
       }
-      await loadProperties();
-      setMessage('Rental rates saved for the active property.');
-      setTimeout(() => setMessage(null), 2500);
+      const updated = (await res.json()) as Property;
+      setProperties(prev => prev.map(p => (p.id === updated.id ? updated : p)));
+      setRatesForm(ratesToForm(updated.rentalRates));
+      // Live bookings / public site only switch when the property being edited is active
+      if (updated.isActive) {
+        notifyActiveRatesChanged();
+      }
+      setMessage(
+        updated.isActive
+          ? `Rental rates saved for ${updated.name}. Sites, bookings, and the public website will use the new amounts.`
+          : `Rental rates saved for ${updated.name}. They apply when this property is set as active.`
+      );
+      setTimeout(() => setMessage(null), 4000);
     } catch {
       setError('Network error — could not save rental rates.');
     } finally {
@@ -259,10 +335,11 @@ export function PropertiesWidget() {
     new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
 
   const activeProperty = properties.find(p => p.isActive) ?? null;
-  const activeAllowed = getAllowedRentalTypes(activeProperty);
-  const showMonthlyRates = activeAllowed.includes('monthly');
-  const showWeeklyRates = activeAllowed.includes('weekly');
-  const showDailyRates = activeAllowed.includes('daily');
+  const ratesProperty = properties.find(p => p.id === ratesPropertyId) ?? null;
+  const ratesAllowed = getAllowedRentalTypes(ratesProperty);
+  const showMonthlyRates = ratesAllowed.includes('monthly');
+  const showWeeklyRates = ratesAllowed.includes('weekly');
+  const showDailyRates = ratesAllowed.includes('daily');
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
@@ -274,7 +351,8 @@ export function PropertiesWidget() {
           <div>
             <h2 className="text-xl font-serif text-[#3D3730]">Properties</h2>
             <p className="text-sm text-[#5A6355] mt-1">
-              Add and manage RV parks or locations. Mark one as active to manage rental rates and day-to-day operations.
+              Add locations (RV park, Big House, Little House, tree house, etc.). Set rates on each property;
+              the active property drives live bookings and the public website.
             </p>
           </div>
         </div>
@@ -295,27 +373,49 @@ export function PropertiesWidget() {
         <p className="text-sm text-[#3D5A3D] bg-[#E8F0E8] border border-[#A8B2A6] rounded-2xl px-4 py-3">{message}</p>
       )}
 
-      {activeProperty && (
-        <div className="bg-white rounded-[32px] border border-[#C29474] ring-1 ring-[#C29474]/20 p-6 shadow-sm space-y-4">
+      {properties.length > 0 && (
+        <div
+          id="property-rates-editor"
+          className="bg-white rounded-[32px] border border-[#C29474] ring-1 ring-[#C29474]/20 p-6 shadow-sm space-y-4 scroll-mt-6"
+        >
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 bg-[#EDE7E1] rounded-xl flex items-center justify-center shrink-0">
               <DollarSign className="w-5 h-5 text-[#5A6355]" />
             </div>
-            <div className="min-w-0">
-              <h3 className="text-sm font-serif text-[#3D3730]">Rental rates — {activeProperty.name}</h3>
-              <p className="text-xs text-[#5A6355] mt-1">
-                These rates apply while this property is active (bookings, sites, and public website).
-                {showMonthlyRates && !showWeeklyRates && !showDailyRates && (
-                  <span className="block mt-1 text-[#6B4A32]">
-                    This property is monthly rental only — weekly and daily rates are not used.
-                  </span>
-                )}
-                {showDailyRates && !showWeeklyRates && !showMonthlyRates && (
-                  <span className="block mt-1 text-[#6B4A32]">
-                    This property is daily rental only — monthly and weekly rates are not used.
-                  </span>
-                )}
+            <div className="min-w-0 flex-1 space-y-2">
+              <h3 className="text-sm font-serif text-[#3D3730]">Rental rates by property</h3>
+              <p className="text-xs text-[#5A6355]">
+                Choose any property (including Big House) to set its rates. Live bookings use the{' '}
+                <strong>active</strong> property’s rates
+                {activeProperty ? ` (currently ${activeProperty.name})` : ''}.
               </p>
+              <div className="space-y-1 max-w-md">
+                <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">
+                  Property to edit rates
+                </label>
+                <select
+                  value={ratesPropertyId ?? ''}
+                  onChange={(e) => selectRatesProperty(e.target.value)}
+                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                >
+                  {properties.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                      {p.isActive ? ' · Active' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {ratesProperty && showMonthlyRates && !showWeeklyRates && !showDailyRates && (
+                <p className="text-xs text-[#6B4A32]">
+                  {ratesProperty.name} is monthly rental only — weekly and daily rates are not used.
+                </p>
+              )}
+              {ratesProperty && showDailyRates && !showWeeklyRates && !showMonthlyRates && (
+                <p className="text-xs text-[#6B4A32]">
+                  {ratesProperty.name} is daily rental only — monthly and weekly rates are not used.
+                </p>
+              )}
             </div>
           </div>
 
@@ -386,22 +486,80 @@ export function PropertiesWidget() {
             </div>
           </div>
 
+          {(showDailyRates || showWeeklyRates) && (
+            <div className="rounded-2xl border border-[#E2D9D0] bg-[#FBF9F7] p-4 space-y-3">
+              <div>
+                <h4 className="text-sm font-semibold text-[#3D3730]">Transient lodging tax</h4>
+                <p className="text-xs text-[#5A6355] mt-1">
+                  Applied to <strong>daily</strong> and <strong>weekly</strong> stays only (not monthly).
+                  Enter percents (e.g. <code className="bg-white px-1 rounded border border-[#E2D9D0]">1.5</code> for 1.5%).
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">
+                    State transient tax (%)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.001"
+                    value={ratesForm.stateTransientTaxPercent}
+                    onChange={e => setRatesForm(p => ({ ...p, stateTransientTaxPercent: e.target.value }))}
+                    className="w-full px-4 py-3 bg-white border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">
+                    County transient tax (%)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.001"
+                    value={ratesForm.countyTransientTaxPercent}
+                    onChange={e => setRatesForm(p => ({ ...p, countyTransientTaxPercent: e.target.value }))}
+                    className="w-full px-4 py-3 bg-white border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                  />
+                </div>
+              </div>
+              <p className="text-[11px] text-[#5A6355]">
+                Combined tax on a sample $100 daily/weekly rent:{' '}
+                <strong className="text-[#3D3730]">
+                  {(
+                    (parseFloat(ratesForm.stateTransientTaxPercent) || 0) +
+                    (parseFloat(ratesForm.countyTransientTaxPercent) || 0)
+                  ).toFixed(3)}
+                  %
+                </strong>
+                {' '}→{' '}
+                {formatMoney(
+                  100 *
+                    ((parseFloat(ratesForm.stateTransientTaxPercent) || 0) +
+                      (parseFloat(ratesForm.countyTransientTaxPercent) || 0)) /
+                      100
+                )}{' '}
+                tax
+              </p>
+            </div>
+          )}
+
           <button
             type="button"
             onClick={handleSaveRates}
-            disabled={savingRates || isLoading}
+            disabled={savingRates || isLoading || !ratesPropertyId}
             className="flex items-center gap-2 bg-[#5A6355] text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#3D3730] disabled:opacity-50"
           >
             <Save className="w-4 h-4" />
-            {savingRates ? 'Saving rates…' : 'Save rental rates'}
+            {savingRates
+              ? 'Saving rates…'
+              : ratesProperty
+                ? `Save rates for ${ratesProperty.name}`
+                : 'Save rental rates'}
           </button>
         </div>
-      )}
-
-      {!activeProperty && properties.length > 0 && (
-        <p className="text-sm text-[#6B4A32] bg-[#F5E6DC] border border-[#C29474]/40 rounded-2xl px-4 py-3">
-          Set a property as active to add or edit rental rates.
-        </p>
       )}
 
       {showForm && (
@@ -585,9 +743,9 @@ export function PropertiesWidget() {
               </p>
             )}
 
-            {property.isActive && property.rentalRates && (
+            {property.rentalRates && (
               <div className="text-xs text-[#5A6355] bg-[#FBF9F7] rounded-2xl px-3 py-2 border border-[#E2D9D0] space-y-1">
-                <p className="font-semibold text-[#3D3730]">Current rates</p>
+                <p className="font-semibold text-[#3D3730]">Rates on file</p>
                 {(() => {
                   const allowed = getAllowedRentalTypes(property);
                   return (
@@ -602,6 +760,13 @@ export function PropertiesWidget() {
                         <p>
                           Daily {formatMoney(property.rentalRates.dailyWeekday)} weekday /{' '}
                           {formatMoney(property.rentalRates.dailyWeekend)} weekend
+                        </p>
+                      )}
+                      {(allowed.includes('daily') || allowed.includes('weekly')) && (
+                        <p className="text-[#6B4A32]">
+                          Transient tax (daily/weekly): state{' '}
+                          {property.rentalRates.stateTransientTaxPercent ?? 0}% · county{' '}
+                          {property.rentalRates.countyTransientTaxPercent ?? 0}%
                         </p>
                       )}
                       {allowed.length === 1 && allowed[0] === 'monthly' && (
@@ -630,6 +795,18 @@ export function PropertiesWidget() {
                   Set active
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => {
+                  selectRatesProperty(property.id);
+                  // Scroll rates editor into view
+                  document.getElementById('property-rates-editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }}
+                className="flex items-center gap-1.5 text-xs font-semibold border border-[#C29474]/50 text-[#6B4A32] bg-[#FBF5F0] px-3 py-2 rounded-xl hover:bg-[#F5E6DC]"
+              >
+                <DollarSign className="w-3.5 h-3.5" />
+                Set rates
+              </button>
               <button
                 type="button"
                 onClick={() => startEdit(property)}

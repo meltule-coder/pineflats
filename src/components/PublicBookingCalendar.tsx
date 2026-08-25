@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight, CalendarDays } from 'lucide-react';
 import { RentalType } from '../../types';
 import {
   DEFAULT_RENTAL_RATES,
-  rentAmountForType, calculateStayTotal, parseDateKey,
+  rentAmountForType, calculateStayBreakdown, parseDateKey,
   type RentalRatesConfig,
 } from '../../rentUtils';
 
@@ -12,7 +12,17 @@ function formatCurrency(amount: number) {
 }
 
 function toDateKey(date: Date) {
-  return date.toISOString().split('T')[0];
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function nightBlocked(
+  dateKey: string,
+  ranges: Array<{ start: string; end: string }>
+): boolean {
+  return ranges.some(r => dateKey >= r.start && dateKey < r.end);
 }
 
 function daysInMonth(year: number, month: number) {
@@ -29,6 +39,9 @@ interface PublicBookingCalendarProps {
   selectedRental: RentalType | null;
   availableSpots: number;
   selectedSiteLabel?: string | null;
+  selectedSiteId?: string | null;
+  /** Reserved / occupied nights (checkout exclusive). When a site is selected, pass only that site. */
+  blockedRanges?: Array<{ start: string; end: string }>;
   checkIn: string | null;
   checkOut: string | null;
   rates?: RentalRatesConfig;
@@ -39,6 +52,8 @@ export function PublicBookingCalendar({
   selectedRental,
   availableSpots,
   selectedSiteLabel,
+  selectedSiteId,
+  blockedRanges = [],
   checkIn,
   checkOut,
   rates = DEFAULT_RENTAL_RATES,
@@ -66,9 +81,11 @@ export function PublicBookingCalendar({
   const checkInDate = checkIn ? parseDateKey(checkIn) : null;
   const checkOutDate = checkOut ? parseDateKey(checkOut) : null;
 
-  const estimatedTotal = selectedRental && checkInDate && checkOutDate && checkOutDate > checkInDate
-    ? calculateStayTotal(selectedRental, checkInDate, checkOutDate, rates)
-    : null;
+  const estimatedBreakdown =
+    selectedRental && checkInDate && checkOutDate && checkOutDate > checkInDate
+      ? calculateStayBreakdown(selectedRental, checkInDate, checkOutDate, rates)
+      : null;
+  const estimatedTotal = estimatedBreakdown?.grandTotal ?? null;
 
   const nights = checkInDate && checkOutDate && checkOutDate > checkInDate
     ? Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24))
@@ -77,6 +94,8 @@ export function PublicBookingCalendar({
   const handleDayClick = (date: Date) => {
     if (date < today) return;
     const key = toDateKey(date);
+    // When a site is selected, do not allow starting a stay on a reserved night
+    if (selectedSiteId && nightBlocked(key, blockedRanges)) return;
 
     if (!checkIn || (checkIn && checkOut)) {
       onDatesChange(key, null);
@@ -87,6 +106,17 @@ export function PublicBookingCalendar({
     if (date <= start) {
       onDatesChange(key, null);
       return;
+    }
+
+    // Reject ranges that include any reserved night for the selected site
+    if (selectedSiteId) {
+      let cursor = new Date(start);
+      // Cap iterations so a bad date can never freeze the browser
+      for (let i = 0; i < 800 && cursor < date; i++) {
+        if (nightBlocked(toDateKey(cursor), blockedRanges)) return;
+        cursor = addDays(cursor, 1);
+      }
+      if (!(cursor >= date)) return;
     }
 
     onDatesChange(checkIn, key);
@@ -111,6 +141,9 @@ export function PublicBookingCalendar({
             <p className="text-xs text-[#5A6355]">
               {availableSpots} spots available · tap check-in, then check-out
               {selectedSiteLabel && <> · Site: <strong>{selectedSiteLabel}</strong></>}
+              {blockedRanges.length > 0 && selectedSiteId && (
+                <> · <span className="text-[#C29474]">shaded nights reserved</span></>
+              )}
             </p>
           </div>
         </div>
@@ -149,6 +182,7 @@ export function PublicBookingCalendar({
 
           const key = cell.key;
           const isPast = cell.date < today;
+          const isBlocked = !isPast && nightBlocked(key, blockedRanges);
           const isCheckIn = checkIn === key;
           const isCheckOut = checkOut === key;
           const inRange = isInRange(cell.date);
@@ -157,20 +191,25 @@ export function PublicBookingCalendar({
           return (
             <button
               key={cell.key}
-              disabled={isPast}
+              disabled={isPast || (Boolean(selectedSiteId) && isBlocked)}
+              title={isBlocked ? 'Reserved / unavailable' : undefined}
               onClick={() => handleDayClick(cell.date!)}
               className={`aspect-square rounded-xl text-sm font-medium transition relative ${
                 isPast
                   ? 'text-[#C4BAB0] cursor-not-allowed'
-                  : isCheckIn || isCheckOut
-                    ? 'bg-[#C29474] text-white shadow-md'
-                    : inRange
-                      ? 'bg-[#F5E6DC] text-[#6B4A32]'
-                      : 'hover:bg-[#FBF9F7] text-[#3D3730] border border-transparent hover:border-[#E2D9D0]'
+                  : isBlocked && selectedSiteId
+                    ? 'bg-[#EDE7E1] text-[#A89F96] cursor-not-allowed line-through decoration-[#C4BAB0]'
+                    : isCheckIn || isCheckOut
+                      ? 'bg-[#C29474] text-white shadow-md'
+                      : inRange
+                        ? 'bg-[#F5E6DC] text-[#6B4A32]'
+                        : isBlocked
+                          ? 'bg-[#F5F0EB] text-[#A89F96]'
+                          : 'hover:bg-[#FBF9F7] text-[#3D3730] border border-transparent hover:border-[#E2D9D0]'
               }`}
             >
               <span>{cell.date.getDate()}</span>
-              {selectedRental === 'daily' && !isPast && (
+              {selectedRental === 'daily' && !isPast && !isBlocked && (
                 <span className={`absolute bottom-1 left-1/2 -translate-x-1/2 text-[8px] ${isCheckIn || isCheckOut ? 'text-white/80' : isWeekend ? 'text-[#C29474]' : 'text-[#5A6355]'}`}>
                   {isWeekend ? '59' : '49'}
                 </span>
@@ -202,6 +241,12 @@ export function PublicBookingCalendar({
                 ? formatCurrency(rentAmountForType(selectedRental, new Date(), rates))
                 : 'Choose rental type'}
           </p>
+          {estimatedBreakdown?.taxApplies && estimatedBreakdown.totalTax > 0 && (
+            <p className="text-[10px] text-[#5A6355] mt-1">
+              Incl. tax: rent {formatCurrency(estimatedBreakdown.subtotal)} +{' '}
+              {formatCurrency(estimatedBreakdown.totalTax)}
+            </p>
+          )}
         </div>
       </div>
     </div>

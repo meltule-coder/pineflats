@@ -1,0 +1,58 @@
+Pine Flats — Point pineflatsrvpark.com (GoDaddy) at your live park website
+===========================================================================
+
+Your website DATA already lives on the VPS (sites, tenants, photos, comments).
+It does NOT need to be "copied" from IONOS. We only need DNS to point the
+NEW domain at the same server.
+
+Server IP:  74.208.115.104
+Old site:   https://pineflatsrv.com  (Cloudflare → same server, still works)
+New site:   https://pineflatsrvpark.com  (GoDaddy domain — set DNS as below)
+
+------------------------------------------------------------------------
+STEP 1 — GoDaddy DNS (you must do this in the GoDaddy website)
+------------------------------------------------------------------------
+1. Log in to https://dcc.godaddy.com or https://www.godaddy.com
+2. Open Domains → pineflatsrvpark.com → DNS / Manage DNS
+3. DELETE or edit any existing A / CNAME that points to GoDaddy website builder
+   (e.g. A records to 35.x / 100.x, or www CNAME to multiscreensite.com)
+4. Set these records:
+
+   Type    Name    Value              TTL
+   ----    ----    -----              ---
+   A       @       74.208.115.104     600 (or 1 Hour)
+   A       www     74.208.115.104     600
+
+   Optional: remove "Forwarding" / "Website" builder for this domain so it
+   does not override DNS.
+
+5. Save. Wait 5–60 minutes (sometimes up to a few hours).
+
+------------------------------------------------------------------------
+STEP 2 — Check
+------------------------------------------------------------------------
+Open:  http://pineflatsrvpark.com
+Open:  http://www.pineflatsrvpark.com
+You should see the SAME Pine Flats site as pineflatsrv.com
+
+Admin: http://pineflatsrvpark.com/admin  (same password)
+
+------------------------------------------------------------------------
+STEP 3 — HTTPS (after DNS works)
+------------------------------------------------------------------------
+Tell Grok "DNS is done" and we will install a free SSL certificate
+(Let's Encrypt) for pineflatsrvpark.com on the server.
+
+------------------------------------------------------------------------
+STEP 4 — Optional: send old domain to new domain
+------------------------------------------------------------------------
+In Cloudflare for pineflatsrv.com, add a Redirect Rule:
+  pineflatsrv.com/*  →  https://pineflatsrvpark.com/$1
+so old links still work.
+
+------------------------------------------------------------------------
+What is already done on the server
+------------------------------------------------------------------------
+- nginx accepts pineflatsrvpark.com and www.pineflatsrvpark.com
+- Same app + same data folder /opt/pineflats/data
+- No data loss; nothing is deleted from the old domain until you choose

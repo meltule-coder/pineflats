@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { atomicWriteJson } from './persist';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
@@ -24,7 +25,7 @@ function loadConfig(): Record<string, unknown> {
 
 function saveConfig(config: Record<string, unknown>) {
   ensureDataDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  atomicWriteJson(CONFIG_FILE, config);
 }
 
 export function extractDocId(url: string): string | null {

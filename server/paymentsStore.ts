@@ -5,12 +5,14 @@ import {
   TenantPayment, PaymentRecord, MeterRecord, ExtraCharge, PaymentCredit, RentalType,
   SavedPaymentCard, StoredPaymentCard
 } from '../types';
-import { rentAmountForType, prorateMonthlyRent } from '../rentUtils';
-import { getTenant } from './tenantsStore';
+import { rentAmountForType, prorateMonthlyRent, calculateWeeklyStayTotal, parseDateKey } from '../rentUtils';
+import { getTenant, updateTenant } from './tenantsStore';
 import { getActiveRentalRates } from './propertiesStore';
+import { getSlots, updateSlot } from './slotsStore';
 import {
   encryptSensitive, decryptSensitive, sanitizeToLast4, detectCardBrandFromLast4Only
 } from './cardSecurity';
+import { atomicWriteJson } from './persist';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const PAYMENTS_FILE = path.join(DATA_DIR, 'payments.json');
@@ -51,7 +53,7 @@ export function getAllPaymentTotals(): Record<string, number> {
 
 function saveAll(data: Record<string, TenantPayment>) {
   ensureDataDir();
-  fs.writeFileSync(PAYMENTS_FILE, JSON.stringify(data, null, 2));
+  atomicWriteJson(PAYMENTS_FILE, data);
 }
 
 function resolveRentalType(tenantId: string, payment?: TenantPayment): RentalType {
@@ -195,45 +197,74 @@ function isStoredCard(card: SavedPaymentCard | StoredPaymentCard): card is Store
   return typeof (card as StoredPaymentCard).sealed === 'string' && !!(card as StoredPaymentCard).sealed;
 }
 
-/** Decrypt / migrate a single card for API responses (never includes full PAN). */
-export function toPublicCard(card: SavedPaymentCard | StoredPaymentCard): SavedPaymentCard | null {
+/** Full decrypted card fields for internal updates only. */
+function readCardPayload(
+  card: SavedPaymentCard | StoredPaymentCard
+): {
+  brand: string;
+  last4: string;
+  cardholderName: string;
+  expMonth: string;
+  expYear: string;
+  billingZip?: string;
+  label?: string;
+  notes?: string;
+} | null {
   if (isStoredCard(card)) {
     const payload = decryptSensitive(card.sealed);
-    if (payload) {
+    if (payload?.last4) {
+      const last4 = sanitizeToLast4(payload.last4) || payload.last4.slice(-4);
+      if (last4.length !== 4) return null;
       return {
-        id: card.id,
         brand: card.brand || 'Card',
-        isDefault: card.isDefault,
-        createdAt: card.createdAt,
-        cardholderName: payload.cardholderName,
-        last4: payload.last4,
-        expMonth: payload.expMonth,
-        expYear: payload.expYear,
+        last4,
+        cardholderName: payload.cardholderName || card.brand || 'Card',
+        expMonth: payload.expMonth || '01',
+        expYear: payload.expYear || String(new Date().getFullYear() + 3),
         billingZip: payload.billingZip,
         label: payload.label,
         notes: payload.notes,
       };
     }
-    // Broken seal — try legacy plaintext fields on same object
   }
-
   const legacy = card as SavedPaymentCard & Partial<StoredPaymentCard>;
-  if (legacy.last4 && legacy.cardholderName && legacy.expMonth && legacy.expYear) {
+  const last4 =
+    sanitizeToLast4(String(legacy.last4 || '')) ||
+    (legacy.last4 ? String(legacy.last4).replace(/\D/g, '').slice(-4) : '');
+  if (last4 && last4.length === 4) {
     return {
-      id: legacy.id,
       brand: legacy.brand || 'Card',
-      isDefault: legacy.isDefault,
-      createdAt: legacy.createdAt,
-      cardholderName: legacy.cardholderName,
-      last4: sanitizeToLast4(legacy.last4) || legacy.last4.slice(-4),
-      expMonth: legacy.expMonth,
-      expYear: legacy.expYear,
+      last4,
+      cardholderName: legacy.cardholderName || legacy.brand || 'Card',
+      expMonth: legacy.expMonth || '01',
+      expYear: legacy.expYear || String(new Date().getFullYear() + 3),
       billingZip: legacy.billingZip,
       label: legacy.label,
       notes: legacy.notes,
     };
   }
   return null;
+}
+
+/**
+ * Decrypt / migrate a single card for API responses.
+ * Staff only see brand + last 4 (never full PAN, CVV, or extra identity fields).
+ */
+export function toPublicCard(card: SavedPaymentCard | StoredPaymentCard): SavedPaymentCard | null {
+  const full = readCardPayload(card);
+  if (!full) return null;
+  const stored = card as StoredPaymentCard;
+  return {
+    id: stored.id || (card as SavedPaymentCard).id,
+    brand: full.brand,
+    isDefault: card.isDefault,
+    createdAt: card.createdAt,
+    // Placeholder fields required by type — UI only displays brand + last4
+    cardholderName: '',
+    last4: full.last4,
+    expMonth: '',
+    expYear: '',
+  };
 }
 
 /** Map stored cards to safe public view; drops undecryptable records. */
@@ -286,34 +317,35 @@ function migrateCardsToEncrypted(
 export function addSavedCard(
   tenantId: string,
   input: {
-    cardholderName: string;
+    cardholderName?: string;
     /** @deprecated Prefer last4 only — full PAN is discarded immediately */
     cardNumber?: string;
     last4?: string;
     brand?: string;
-    expMonth: string;
-    expYear: string;
+    expMonth?: string;
+    expYear?: string;
     billingZip?: string;
     label?: string;
     notes?: string;
     isDefault?: boolean;
   }
 ): TenantPayment | null {
-  const name = (input.cardholderName || '').trim();
-  if (!name) return null;
-
-  // Security: only last 4 digits ever retained (full PAN discarded)
+  // Security: only brand + last 4 digits are required / shown to staff
   const last4 = sanitizeToLast4(String(input.last4 || input.cardNumber || ''));
   if (!last4) return null;
 
-  const expMonth = String(input.expMonth || '').padStart(2, '0');
-  const expYearRaw = String(input.expYear || '').trim();
-  if (!/^\d{2}$/.test(expMonth) || Number(expMonth) < 1 || Number(expMonth) > 12) return null;
-  if (!/^\d{2,4}$/.test(expYearRaw)) return null;
+  const brand = detectCardBrandFromLast4Only(last4, input.brand);
+  // Name / expiry optional — display is brand + last4 only
+  const name = (input.cardholderName || '').trim() || brand;
+  let expMonth = String(input.expMonth || '').replace(/\D/g, '').padStart(2, '0');
+  let expYearRaw = String(input.expYear || '').replace(/\D/g, '').trim();
+  if (!/^\d{2}$/.test(expMonth) || Number(expMonth) < 1 || Number(expMonth) > 12) {
+    expMonth = '01';
+  }
+  if (!/^\d{2,4}$/.test(expYearRaw)) {
+    expYearRaw = String(new Date().getFullYear() + 3);
+  }
   const expYear = expYearRaw.length === 2 ? `20${expYearRaw}` : expYearRaw;
-
-  // Reject obvious CVV-sized input mistakes (3–4 digit only year/etc handled above)
-  // Never store CVV — field is not accepted
 
   const all = loadAll();
   const current = ensureCurrentPeriod(tenantId, all[tenantId] ?? defaultPayment(tenantId));
@@ -324,15 +356,12 @@ export function addSavedCard(
     cards = cards.map(c => ({ ...c, isDefault: false }));
   }
 
-  const brand = detectCardBrandFromLast4Only(last4, input.brand);
   const sealed = encryptSensitive({
     cardholderName: name,
     last4,
     expMonth,
     expYear,
-    billingZip: (input.billingZip || '').trim() || undefined,
-    label: (input.label || '').trim() || undefined,
-    notes: (input.notes || '').trim() || undefined,
+    // Do not persist zip/label/notes for the simplified card-on-file view
   });
 
   const stored: StoredPaymentCard = {
@@ -348,6 +377,16 @@ export function addSavedCard(
   next.balanceDue = recomputeBalanceDue(tenantId, next);
   all[tenantId] = next;
   saveAll(all);
+
+  // Share brand + last4 in the renewal vault for any future stay
+  try {
+    // Lazy require avoids circular init issues
+    const { syncCardRefFromTenant } = require('./cardRefsStore') as typeof import('./cardRefsStore');
+    syncCardRefFromTenant(tenantId, brand, last4);
+  } catch (err) {
+    console.error('syncCardRefFromTenant failed:', err);
+  }
+
   return withPublicCards(all[tenantId]);
 }
 
@@ -376,23 +415,23 @@ export function updateSavedCard(
   const index = cards.findIndex(c => c.id === cardId);
   if (index === -1) return null;
 
-  const existingPublic = toPublicCard(cards[index]);
-  if (!existingPublic) return null;
+  const existing = readCardPayload(cards[index]);
+  if (!existing) return null;
 
-  let last4 = existingPublic.last4;
+  let last4 = existing.last4;
   if (updates.last4 !== undefined) {
     const normalized = sanitizeToLast4(String(updates.last4));
     if (!normalized) return null;
     last4 = normalized;
   }
 
-  let expMonth = existingPublic.expMonth;
+  let expMonth = existing.expMonth;
   if (updates.expMonth !== undefined) {
     expMonth = String(updates.expMonth).padStart(2, '0');
     if (!/^\d{2}$/.test(expMonth) || Number(expMonth) < 1 || Number(expMonth) > 12) return null;
   }
 
-  let expYear = existingPublic.expYear;
+  let expYear = existing.expYear;
   if (updates.expYear !== undefined) {
     const y = String(updates.expYear).trim();
     if (!/^\d{2,4}$/.test(y)) return null;
@@ -405,8 +444,8 @@ export function updateSavedCard(
 
   const brand =
     updates.brand !== undefined
-      ? (updates.brand.trim() || existingPublic.brand)
-      : existingPublic.brand;
+      ? (updates.brand.trim() || existing.brand)
+      : existing.brand;
 
   cards[index] = {
     id: cards[index].id,
@@ -416,23 +455,12 @@ export function updateSavedCard(
     sealed: encryptSensitive({
       cardholderName:
         updates.cardholderName !== undefined
-          ? updates.cardholderName.trim() || existingPublic.cardholderName
-          : existingPublic.cardholderName,
+          ? updates.cardholderName.trim() || existing.cardholderName
+          : existing.cardholderName,
       last4,
       expMonth,
       expYear,
-      billingZip:
-        updates.billingZip !== undefined
-          ? (updates.billingZip.trim() || undefined)
-          : existingPublic.billingZip,
-      label:
-        updates.label !== undefined
-          ? (updates.label.trim() || undefined)
-          : existingPublic.label,
-      notes:
-        updates.notes !== undefined
-          ? (updates.notes.trim() || undefined)
-          : existingPublic.notes,
+      // Keep display limited to brand + last4; do not reintroduce zip/label/notes from public updates
     }),
   };
 
@@ -789,7 +817,22 @@ export function addPaymentRecord(
 ): TenantPayment {
   const all = loadAll();
   let current = ensureCurrentPeriod(tenantId, all[tenantId] ?? defaultPayment(tenantId));
-  const newRecord: PaymentRecord = { ...record, id: `pay-${Date.now()}` };
+  const amount = Number(record.amount);
+  const method = String(record.method || 'Cash');
+  const isRefund = /^refund/i.test(method);
+  if (Number.isNaN(amount) || amount === 0) {
+    throw new Error('Invalid payment amount');
+  }
+  // Cash/card refunds may be recorded as negative amounts (method must start with "Refund")
+  if (amount < 0 && !isRefund) {
+    throw new Error('Negative amounts are only allowed for Refund method');
+  }
+  const newRecord: PaymentRecord = {
+    ...record,
+    id: `pay-${Date.now()}`,
+    amount,
+    method,
+  };
   const records = [newRecord, ...current.records];
   current = { ...current, records };
   current.balanceDue = recomputeBalanceDue(tenantId, current);
@@ -1147,4 +1190,273 @@ export function deleteMeterRecord(tenantId: string, recordId: string): TenantPay
   all[tenantId] = next;
   saveAll(all);
   return all[tenantId];
+}
+
+export const EARLY_DEPARTURE_KWH_RATE = KWH_RATE;
+
+export interface EarlyDepartureInput {
+  departureDate: string;
+  meterReading: number;
+  previousReading?: number;
+  note?: string;
+  /** When true, record a negative Refund payment for overpayment after closing */
+  issueRefund?: boolean;
+  refundMethod?: string;
+  /** preview only — do not persist */
+  preview?: boolean;
+}
+
+export interface EarlyDepartureBreakdown {
+  departureDate: string;
+  rentalType: RentalType;
+  rentBefore: number;
+  rentAfter: number;
+  unusedRent: number;
+  meterReading: number;
+  previousReading: number;
+  kwhUsage: number;
+  electricCharge: number;
+  kwhRate: number;
+  balanceDue: number;
+  refundOwed: number;
+  closingBill: number;
+  periodPaid: number;
+}
+
+export interface EarlyDepartureResult {
+  payment: TenantPayment;
+  breakdown: EarlyDepartureBreakdown;
+  refundRecorded: boolean;
+  tenantEndDate: string;
+}
+
+function inclusiveNights(startKey: string, endKey: string): number {
+  try {
+    const a = parseDateKey(startKey.slice(0, 10));
+    const b = parseDateKey(endKey.slice(0, 10));
+    if (b < a) return 0;
+    return Math.round((b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24));
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Early departure closing: final meter reading + rent through departure date.
+ * - Monthly: sets rentChargeEnd and tenant endDate → prorates rent down
+ * - Weekly: prorates weekly rate by nights stayed
+ * Returns closing bill (balance due) and/or refund owed (overpayment).
+ */
+export function applyEarlyDepartureClosing(
+  tenantId: string,
+  input: EarlyDepartureInput
+): EarlyDepartureResult {
+  const tenant = getTenant(tenantId);
+  if (!tenant) throw new Error('Tenant not found');
+
+  const departureDate = String(input.departureDate || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(departureDate)) {
+    throw new Error('Departure date is required (YYYY-MM-DD)');
+  }
+
+  const meterReading = Number(input.meterReading);
+  if (Number.isNaN(meterReading) || meterReading < 0) {
+    throw new Error('Enter a valid final meter reading');
+  }
+
+  const all = loadAll();
+  let current = ensureCurrentPeriod(tenantId, all[tenantId] ?? defaultPayment(tenantId));
+  current = applyMonthlyProration(tenantId, current);
+  const rentalType = resolveRentalType(tenantId, current);
+  const rentBefore = resolveRentAmount(current, tenantId);
+
+  const previousReading =
+    input.previousReading !== undefined && !Number.isNaN(Number(input.previousReading))
+      ? Math.max(0, Number(input.previousReading))
+      : getEffectivePreviousReading(current);
+  if (meterReading < previousReading) {
+    throw new Error(
+      `Final reading (${meterReading}) cannot be less than previous (${previousReading})`
+    );
+  }
+  const kwhUsage = Math.max(0, meterReading - previousReading);
+  const electricCharge = Math.round(kwhUsage * KWH_RATE * 100) / 100;
+
+  const rates = getActiveRentalRates();
+  let rentAfter = rentBefore;
+
+  if (rentalType === 'monthly') {
+    const base = current.baseMonthlyRate ?? rates.monthly;
+    const start =
+      current.rentChargeStart
+      || tenant.startDate
+      || departureDate;
+    const proration = prorateMonthlyRent({
+      monthlyRate: base,
+      startDate: start,
+      endDate: departureDate,
+      billingPeriod: current.billingPeriod,
+      mode: 'range',
+    });
+    rentAfter = proration.amount;
+    current = {
+      ...current,
+      rentChargeStart: start.slice(0, 10),
+      rentChargeEnd: departureDate,
+      baseMonthlyRate: base,
+      rentAmount: rentAfter,
+      rentProration: {
+        fullRate: proration.fullRate,
+        dailyRate: proration.dailyRate,
+        daysCharged: proration.daysCharged,
+        billableDays: proration.billableDays,
+        extraDaysFor31DayMonth: proration.extraDaysFor31DayMonth,
+        daysInPeriod: proration.daysInPeriod,
+        prorated: proration.prorated,
+        chargeStart: proration.chargeStart,
+        chargeEnd: proration.chargeEnd,
+      },
+    };
+  } else if (rentalType === 'weekly') {
+    const start = (tenant.startDate || current.rentChargeStart || departureDate).slice(0, 10);
+    const nights = Math.max(1, inclusiveNights(start, departureDate));
+    rentAfter = calculateWeeklyStayTotal(nights, rates);
+    current = {
+      ...current,
+      rentAmount: rentAfter,
+      rentChargeStart: start,
+      rentChargeEnd: departureDate,
+    };
+  } else {
+    // Daily: charge through departure (keep rentAmount or one day)
+    rentAfter = current.rentAmount ?? rentAmountForType('daily');
+    current = {
+      ...current,
+      rentChargeEnd: departureDate,
+    };
+  }
+
+  const unusedRent = Math.max(0, Math.round((rentBefore - rentAfter) * 100) / 100);
+  const note = String(input.note || '').trim();
+
+  // Meter record (final reading)
+  const meterRecords = current.meterRecords ?? [];
+  const newMeter: MeterRecord = {
+    id: `meter-${Date.now()}`,
+    date: departureDate,
+    reading: meterReading,
+    previousReading,
+    usage: kwhUsage,
+    note: note
+      ? `Early departure final reading. ${note}`
+      : 'Early departure final reading',
+  };
+  current = applyMeterChain(tenantId, current, [newMeter, ...meterRecords]);
+
+  // Ensure rent fields survive meter chain
+  if (rentalType === 'monthly') {
+    current = applyMonthlyProration(tenantId, {
+      ...current,
+      rentChargeEnd: departureDate,
+    });
+  } else {
+    current = { ...current, rentAmount: rentAfter, rentChargeEnd: departureDate };
+  }
+
+  current.balanceDue = recomputeBalanceDue(tenantId, current);
+
+  const periodPaid = periodPaymentsTotal(current);
+  const periodCharges = computePeriodCharges(current, tenantId);
+  const credits = periodCreditsTotal(current);
+  const carried = current.carriedBalance ?? 0;
+  const refundOwed = Math.max(
+    0,
+    Math.round((periodPaid + credits - carried - periodCharges) * 100) / 100
+  );
+  const closingBill = current.balanceDue;
+  const breakdown: EarlyDepartureBreakdown = {
+    departureDate,
+    rentalType,
+    rentBefore,
+    rentAfter: resolveRentAmount(current, tenantId),
+    unusedRent,
+    meterReading,
+    previousReading,
+    kwhUsage,
+    electricCharge,
+    kwhRate: KWH_RATE,
+    balanceDue: closingBill,
+    refundOwed,
+    closingBill,
+    periodPaid,
+  };
+
+  if (input.preview) {
+    return {
+      payment: withPublicCards(current),
+      breakdown,
+      refundRecorded: false,
+      tenantEndDate: departureDate,
+    };
+  }
+
+  all[tenantId] = current;
+  saveAll(all);
+
+  updateTenant(tenantId, {
+    endDate: departureDate,
+    status: tenant.status || 'Active',
+    notes: [tenant.notes, note ? `Early departure ${departureDate}: ${note}` : `Early departure ${departureDate}`]
+      .filter(Boolean)
+      .join('\n'),
+  });
+
+  let refundRecorded = false;
+  if (input.issueRefund && refundOwed > 0.009) {
+    addPaymentRecord(tenantId, {
+      date: departureDate,
+      amount: -Math.round(refundOwed * 100) / 100,
+      method: String(input.refundMethod || 'Refund').trim() || 'Refund',
+      note: note
+        ? `Early departure refund issued. ${note}`
+        : 'Early departure refund issued',
+    });
+    refundRecorded = true;
+  }
+
+  const payment = getTenantPayment(tenantId);
+
+  // Keep occupied site end date / rent aligned with closing
+  const slot = getSlots().find(
+    (s) => s.tenantId === tenantId || String(s.number) === String(tenant.site)
+  );
+  if (slot) {
+    updateSlot(slot.id, {
+      endDate: departureDate,
+      rentAmount: resolveRentAmount(payment, tenantId),
+      balanceDue: payment.balanceDue,
+    });
+  }
+  const finalPaid = periodPaymentsTotal(payment);
+  const finalCharges = computePeriodCharges(payment, tenantId);
+  const finalCredits = periodCreditsTotal(payment);
+  const finalCarried = payment.carriedBalance ?? 0;
+  const finalRefund = Math.max(
+    0,
+    Math.round((finalPaid + finalCredits - finalCarried - finalCharges) * 100) / 100
+  );
+
+  return {
+    payment,
+    breakdown: {
+      ...breakdown,
+      rentAfter: resolveRentAmount(payment, tenantId),
+      balanceDue: payment.balanceDue,
+      closingBill: payment.balanceDue,
+      refundOwed: refundRecorded ? 0 : finalRefund,
+      periodPaid: finalPaid,
+    },
+    refundRecorded,
+    tenantEndDate: departureDate,
+  };
 }

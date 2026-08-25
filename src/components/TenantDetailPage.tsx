@@ -1,10 +1,11 @@
+import { apiFetch } from '../lib/api';
 import { useEffect, useState, type ElementType } from 'react';
 import {
-  ArrowLeft, MapPin, Phone, Mail, Truck, CreditCard, User, FileText, Save, CheckCircle2, Trash2, Home
+  ArrowLeft, MapPin, Phone, Mail, Truck, CreditCard, User, FileText, Save, CheckCircle2, Trash2, Home, UserPlus
 } from 'lucide-react';
 import { RentalType, Slot, Tenant } from '../../types';
-import { ALL_RENTAL_TYPES } from '../../rentUtils';
-import { fetchActiveRates } from '../lib/activeRates';
+import { ALL_RENTAL_TYPES, DEFAULT_RENTAL_RATES, rentAmountForType } from '../../rentUtils';
+import { fetchActiveRates, subscribeActiveRates, type ActiveRates } from '../lib/activeRates';
 import { ReceiptLink } from './ReceiptLink';
 
 interface TenantDetailPageProps {
@@ -86,6 +87,11 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [error, setError] = useState('');
   const [allowedRentalTypes, setAllowedRentalTypes] = useState<RentalType[]>([...ALL_RENTAL_TYPES]);
+  const [rates, setRates] = useState<ActiveRates>({
+    ...DEFAULT_RENTAL_RATES,
+    allowedRentalTypes: [...ALL_RENTAL_TYPES],
+  });
+  const [converting, setConverting] = useState(false);
 
   useEffect(() => {
     setForm(formFromTenant(tenant));
@@ -95,14 +101,21 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
   }, [tenant.id, tenant.name, tenant.site, tenant.phone, tenant.email, tenant.rvType, tenant.licensePlate, tenant.emergencyContact, tenant.notes, tenant.description, tenant.startDate, tenant.endDate, tenant.status, tenant.rentalType]);
 
   useEffect(() => {
-    fetchActiveRates().then(active => setAllowedRentalTypes(active.allowedRentalTypes));
+    const apply = () => {
+      fetchActiveRates({ force: true }).then(active => {
+        setAllowedRentalTypes(active.allowedRentalTypes);
+        setRates(active);
+      });
+    };
+    apply();
+    return subscribeActiveRates(apply);
   }, []);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('/api/slots');
+        const res = await apiFetch('/api/slots');
         if (!res.ok) return;
         const data = await res.json();
         const slots: Slot[] = Array.isArray(data) ? data : (data.slots ?? []);
@@ -159,6 +172,105 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
       setError(e instanceof Error ? e.message : 'Failed to save tenant info');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const currentRental = (form.rentalType || tenant.rentalType || 'monthly') as RentalType;
+  const canSwitchToMonthly =
+    allowedRentalTypes.includes('monthly') && currentRental !== 'monthly';
+  const canSwitchToWeekly =
+    allowedRentalTypes.includes('weekly') && currentRental !== 'weekly';
+
+  const handleSetRentalType = async (target: 'monthly' | 'weekly') => {
+    const rent = rentAmountForType(target, new Date(), rates);
+    const from = currentRental;
+    const endNote =
+      target === 'monthly'
+        ? 'End date becomes ongoing.'
+        : 'Weekly rate applied; you can set an end date under Stay Details.';
+    if (
+      !window.confirm(
+        `Set ${tenant.name} as a ${target} tenant?\n\n` +
+          `Current: ${from}\n` +
+          `${target === 'monthly' ? 'Monthly' : 'Weekly'} rent: $${rent.toFixed(2)}.\n` +
+          `${endNote}\nPayment history is kept.`
+      )
+    ) {
+      return;
+    }
+    setConverting(true);
+    setError('');
+    try {
+      const slotsRes = await apiFetch('/api/slots');
+      let converted = false;
+      if (slotsRes.ok) {
+        const data = await slotsRes.json();
+        const slots: Slot[] = Array.isArray(data) ? data : (data.slots ?? []);
+        const slot = slots.find(
+          (s) =>
+            String(s.number) === String(tenant.site)
+            || s.tenantId === tenant.id
+        );
+        if (slot) {
+          const res = await apiFetch(`/api/slots/${slot.id}/convert-to-tenant`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contactName: form.name.trim() || tenant.name,
+              contactPhone: form.phone,
+              contactEmail: form.email,
+              contactRvType: form.rvType,
+              contactLicensePlate: form.licensePlate,
+              contactEmergency: form.emergencyContact,
+              contactNotes: form.notes,
+              rentalType: target,
+              rentAmount: rent,
+              balanceDue: rent,
+              startDate: form.startDate || tenant.startDate,
+              endDate: target === 'monthly' ? 'ongoing' : form.endDate || tenant.endDate,
+            }),
+          });
+          if (res.ok) {
+            converted = true;
+          } else {
+            const err = await res.json().catch(() => ({}));
+            if (!String(err.error || '').toLowerCase().includes('already')) {
+              throw new Error(err.error || `Could not set ${target} tenant`);
+            }
+          }
+        }
+      }
+      const nextEnd = target === 'monthly' ? 'ongoing' : (form.endDate || tenant.endDate || 'ongoing');
+      await onSave({
+        rentalType: target,
+        endDate: nextEnd,
+        status: 'Active',
+        rentAmount: rent,
+      } as Partial<Tenant> & { rentAmount?: number });
+      if (!converted) {
+        await apiFetch(`/api/tenants/${tenant.id}/payments`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rentalType: target,
+            rentAmount: rent,
+            balanceDue: rent,
+            ...(target === 'monthly' ? { baseMonthlyRate: rent } : {}),
+          }),
+        });
+      }
+      setForm(prev => ({
+        ...prev,
+        rentalType: target,
+        endDate: nextEnd,
+        status: 'Active',
+      }));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `Failed to set ${target} rental`);
+    } finally {
+      setConverting(false);
     }
   };
 
@@ -245,16 +357,20 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
                       onChange={e => update('rentalType', e.target.value)}
                       className="px-3 py-2 rounded-xl bg-[#FBF9F7] border border-[#F0EBE6] text-sm text-[#5A6355] focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
                     >
-                      {allowedRentalTypes.includes('monthly') && (
+                      {/* Tenants are primarily monthly or weekly */}
+                      {(allowedRentalTypes.includes('monthly') || form.rentalType === 'monthly') && (
                         <option value="monthly">Monthly</option>
                       )}
-                      {allowedRentalTypes.includes('weekly') && (
+                      {(allowedRentalTypes.includes('weekly') || form.rentalType === 'weekly') && (
                         <option value="weekly">Weekly</option>
                       )}
-                      {allowedRentalTypes.includes('daily') && (
-                        <option value="daily">Daily</option>
+                      {(form.rentalType === 'daily' || allowedRentalTypes.includes('daily')) && (
+                        <option value="daily">Daily (short-term)</option>
                       )}
                     </select>
+                    <p className="text-[10px] text-[#5A6355] max-w-[11rem]">
+                      Save info applies the type. Use buttons to set rate + end date.
+                    </p>
                   </div>
                   <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#E8F0E8] border border-[#A8B2A6] text-sm text-[#3D5A3D] capitalize">
                     <CheckCircle2 className="w-3.5 h-3.5" />
@@ -267,6 +383,28 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
                   spaceNumber={form.site || tenant.site}
                   onViewReceipt={onViewReceipt}
                 />
+                {canSwitchToMonthly && (
+                  <button
+                    type="button"
+                    onClick={() => handleSetRentalType('monthly')}
+                    disabled={converting || saving || removing}
+                    className="flex items-center gap-2 bg-[#C29474] text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#A87A5E] transition disabled:opacity-50"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                    {converting ? 'Updating…' : 'Set as monthly'}
+                  </button>
+                )}
+                {canSwitchToWeekly && (
+                  <button
+                    type="button"
+                    onClick={() => handleSetRentalType('weekly')}
+                    disabled={converting || saving || removing}
+                    className="flex items-center gap-2 bg-[#5A6355] text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50"
+                  >
+                    <Home className="w-4 h-4" />
+                    {converting ? 'Updating…' : 'Set as weekly'}
+                  </button>
+                )}
                 <button
                   onClick={onPayments}
                   className="flex items-center gap-2 bg-[#C29474] text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#A87A5E] transition"
@@ -302,10 +440,10 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
                 >
                   <Trash2 className="w-4 h-4" />
                   {removing
-                    ? 'Removing...'
+                    ? 'Moving…'
                     : confirmRemove
-                      ? 'Confirm Remove'
-                      : 'Remove Tenant'}
+                      ? 'Confirm — Save as previous'
+                      : 'Move to previous tenants'}
                 </button>
                 {confirmRemove && !removing && (
                   <button
@@ -318,8 +456,10 @@ export function TenantDetailPage({ tenant, onBack, onSave, onPayments, onViewRec
               </div>
             </div>
             {confirmRemove && (
-              <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-6">
-                This will permanently remove <strong>{form.name || tenant.name}</strong> and free up Space {form.site || tenant.site}.
+              <p className="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-6">
+                <strong>{form.name || tenant.name}</strong> will leave Space {form.site || tenant.site}
+                {' '}and be stored under <strong>Previous tenants</strong> (contact info + payment history kept).
+                The site becomes available again.
               </p>
             )}
             {error && (

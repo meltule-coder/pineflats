@@ -4,6 +4,7 @@ export const SLOT_CONTACT_CLEAR: Partial<Slot> = {
   contactName: undefined,
   contactPhone: undefined,
   contactEmail: undefined,
+  contactAddress: undefined,
   contactRvType: undefined,
   contactLicensePlate: undefined,
   contactEmergency: undefined,
@@ -16,6 +17,11 @@ export const SLOT_CONTACT_CLEAR: Partial<Slot> = {
   rentAmount: undefined,
   rentalType: undefined,
   balanceDue: undefined,
+  previousMeterReading: undefined,
+  meterBaselineCredit: undefined,
+  currentMeterUsage: undefined,
+  meterOverageCharge: undefined,
+  meterRecords: undefined,
 };
 
 export function clearSlotContactFields<T extends Record<string, unknown>>(updates: T): T & Partial<Slot> {

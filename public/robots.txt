@@ -1,0 +1,10 @@
+# Pine Flats RV Park — official self-hosted website
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /api/
+Disallow: /ssh
+Disallow: /vps
+
+Sitemap: https://pineflatsrvpark.com/sitemap.xml
+Sitemap: https://pineflatsrv.com/sitemap.xml

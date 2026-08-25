@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { MapPin, RefreshCw, ExternalLink, LogOut, Grid3x3, FileText, Save, UserPlus, ImagePlus, Trash2, Link as LinkIcon, Users, Wrench, CalendarRange } from 'lucide-react';
-import { ReceiptLink } from './ReceiptLink';
-import { Slot, SlotStatus, RentalType, StoredCustomer } from '../../types';
+import { MapPin, RefreshCw, UserPlus, ImagePlus, Trash2, Users, Wrench, CalendarRange, Gauge, Link as LinkIcon, Save } from 'lucide-react';
+import { Slot, SlotStatus, RentalType, StoredCustomer, MeterRecord } from '../../types';
 import {
   ALL_RENTAL_TYPES,
   DEFAULT_RENTAL_RATES,
   rentAmountForType, formatDailyRateDescription, parseDateKey,
   type RentalRatesConfig,
 } from '../../rentUtils';
-import { fetchActiveRates } from '../lib/activeRates';
+import { fetchActiveRates, subscribeActiveRates } from '../lib/activeRates';
+import { apiFetch } from '../lib/api';
+import { EarlyDeparturePanel } from './EarlyDeparturePanel';
 
 function formatStayDate(key: string) {
   try {
@@ -21,7 +22,9 @@ function formatStayDate(key: string) {
 function formatCurrency(amount: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
 }
-import { googleSignIn, getAccessToken, initAuth, logout } from '../lib/auth';
+
+/** Same as tenant utilities — weekly overage billing */
+const KWH_RATE = 0.24;
 
 const STATUS_STYLES: Record<SlotStatus, string> = {
   available: 'bg-[#E8F0E8] border-[#A8B2A6] text-[#3D5A3D]',
@@ -33,20 +36,13 @@ const STATUS_STYLES: Record<SlotStatus, string> = {
 export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
   const [slots, setSlots] = useState<Slot[]>([]);
   const [available, setAvailable] = useState(25);
-  const [token, setToken] = useState<string | null>(null);
-  const [sheetUrl, setSheetUrl] = useState<string | null>(null);
-  const [sheetConnected, setSheetConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
-  const [receiptDocUrl, setReceiptDocUrl] = useState('');
-  const [receiptConnected, setReceiptConnected] = useState(false);
-  const [receiptDocs, setReceiptDocs] = useState<Array<{ id: string; name: string; url: string }>>([]);
-  const [selectedReceiptDocId, setSelectedReceiptDocId] = useState('');
-  const [receiptError, setReceiptError] = useState<string | null>(null);
   const [contactForm, setContactForm] = useState({
     contactName: '',
     contactPhone: '',
     contactEmail: '',
+    contactAddress: '',
     contactRvType: '',
     contactLicensePlate: '',
     contactEmergency: '',
@@ -54,12 +50,15 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     rentalType: 'monthly' as RentalType,
     rentAmount: '750',
     balanceDue: '750',
+    paymentMethod: '',
   });
   const [formSaved, setFormSaved] = useState(false);
   const [loadingContact, setLoadingContact] = useState(false);
   const [customers, setCustomers] = useState<StoredCustomer[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [siteImageUrlInput, setSiteImageUrlInput] = useState('');
+  const [siteDescription, setSiteDescription] = useState('');
+  const [siteDescSaved, setSiteDescSaved] = useState(false);
   const [uploadingSlotId, setUploadingSlotId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [statusForm, setStatusForm] = useState({
@@ -68,9 +67,18 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     endDate: '',
     rentalType: 'monthly' as RentalType,
     note: '',
+    paymentMethod: '',
+    markPaid: false,
   });
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusPanel, setStatusPanel] = useState<'none' | 'reserve' | 'maintenance'>('none');
+  const [meterReading, setMeterReading] = useState('');
+  const [meterPrevious, setMeterPrevious] = useState('');
+  const [meterDate, setMeterDate] = useState(new Date().toISOString().split('T')[0]);
+  const [meterNote, setMeterNote] = useState('');
+  const [meterBaseline, setMeterBaseline] = useState('0');
+  const [meterError, setMeterError] = useState<string | null>(null);
+  const [meterSaving, setMeterSaving] = useState(false);
   const [rates, setRates] = useState<RentalRatesConfig & { allowedRentalTypes?: RentalType[] }>({
     ...DEFAULT_RENTAL_RATES,
     allowedRentalTypes: ['daily', 'weekly', 'monthly'],
@@ -80,7 +88,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
   const gridPhotoInputRef = useRef<HTMLInputElement>(null);
 
   const loadSlots = async () => {
-    const res = await fetch('/api/slots');
+    const res = await apiFetch('/api/slots');
     if (res.ok) {
       const data = await res.json();
       setSlots(data.slots);
@@ -88,129 +96,36 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     }
   };
 
-  const loadSheetStatus = async () => {
-    const res = await fetch('/api/sheets/status');
-    if (res.ok) {
-      const data = await res.json();
-      setSheetConnected(data.connected);
-      setSheetUrl(data.url);
-    }
-  };
-
-  const loadReceiptConfig = async () => {
-    const res = await fetch('/api/receipts/config');
-    if (res.ok) {
-      const data = await res.json();
-      setReceiptDocUrl(data.receiptDocUrl ?? '');
-      setReceiptConnected(!!data.receiptDocId);
-    }
-  };
-
-  const handleSaveReceiptDoc = async () => {
-    setIsLoading(true);
-    setReceiptError(null);
-    try {
-      const headers = await authHeaders();
-      const res = await fetch('/api/receipts/config', {
-        method: 'PUT',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ docUrl: receiptDocUrl }),
-      });
-      if (res.ok) {
-        await loadReceiptConfig();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setReceiptError(data.error ?? 'Failed to link receipt doc');
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleLoadReceiptDocs = async () => {
-    setIsLoading(true);
-    setReceiptError(null);
-    try {
-      const headers = await authHeaders();
-      const res = await fetch('/api/docs/list', { headers });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setReceiptError(data.error ?? 'Failed to load Google Docs');
-        return;
-      }
-      const data = await res.json();
-      setReceiptDocs(data.documents ?? []);
-      if (data.documents?.length) {
-        setSelectedReceiptDocId(data.documents[0].id);
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleConnectReceiptDoc = async () => {
-    if (!selectedReceiptDocId) return;
-    setIsLoading(true);
-    setReceiptError(null);
-    try {
-      const headers = await authHeaders();
-      const selected = receiptDocs.find(doc => doc.id === selectedReceiptDocId);
-      const res = await fetch('/api/docs/connect', {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ docId: selectedReceiptDocId, docUrl: selected?.url }),
-      });
-      if (res.ok) {
-        await loadReceiptConfig();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setReceiptError(data.error ?? 'Failed to connect Google Doc');
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleCreateReceiptDoc = async () => {
-    setIsLoading(true);
-    setReceiptError(null);
-    try {
-      const headers = await authHeaders();
-      const res = await fetch('/api/docs/setup', {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-      });
-      if (res.ok) {
-        await loadReceiptConfig();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setReceiptError(data.error ?? 'Failed to create Google Doc');
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   const loadCustomers = async () => {
-    const res = await fetch('/api/customers');
+    const res = await apiFetch('/api/customers');
     if (res.ok) setCustomers(await res.json());
   };
 
   useEffect(() => {
-    fetchActiveRates().then(active => {
+    const applyRates = (active: Awaited<ReturnType<typeof fetchActiveRates>>) => {
       setRates(active);
       const allowed = active.allowedRentalTypes?.length
         ? active.allowedRentalTypes
         : [...ALL_RENTAL_TYPES];
       const defaultType = allowed[0] ?? 'monthly';
       setContactForm(prev => {
-        if (allowed.includes(prev.rentalType)) return prev;
-        const amount = String(rentAmountForType(defaultType, new Date(), active));
-        return { ...prev, rentalType: defaultType, rentAmount: amount, balanceDue: amount };
+        const rentalType = allowed.includes(prev.rentalType) ? prev.rentalType : defaultType;
+        const amount = String(rentAmountForType(rentalType, new Date(), active));
+        // Refresh default amounts so new rates show in booking fields
+        return {
+          ...prev,
+          rentalType,
+          rentAmount: amount,
+          balanceDue: amount,
+        };
       });
       setStatusForm(prev => (
         allowed.includes(prev.rentalType) ? prev : { ...prev, rentalType: defaultType }
       ));
+    };
+    fetchActiveRates({ force: true }).then(applyRates);
+    return subscribeActiveRates(() => {
+      fetchActiveRates({ force: true }).then(applyRates);
     });
   }, []);
 
@@ -221,12 +136,6 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
   useEffect(() => {
     loadSlots();
     loadCustomers();
-    loadSheetStatus();
-    loadReceiptConfig();
-    initAuth(
-      (_user, t) => setToken(t),
-      () => setToken(null)
-    );
   }, []);
 
   const applyCustomer = (customer: StoredCustomer) => {
@@ -236,6 +145,8 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
       contactName: customer.name,
       contactPhone: customer.phone,
       contactEmail: customer.email,
+      // Keep site address if already filled; customers store has no address field
+      contactAddress: prev.contactAddress || '',
       contactRvType: customer.rvType ?? '',
       contactLicensePlate: customer.licensePlate ?? '',
       contactEmergency: customer.emergencyContact ?? '',
@@ -244,76 +155,20 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     setFormSaved(false);
   };
 
-  const authHeaders = async () => {
-    const t = token || await getAccessToken();
-    return t ? { Authorization: `Bearer ${t}` } : {};
-  };
-
-  const handleGoogleSignIn = async () => {
-    setIsLoading(true);
-    try {
-      const result = await googleSignIn();
-      if (result) setToken(result.accessToken);
-    } catch (err) {
-      console.error('Sign in failed:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleSetupSheet = async () => {
-    setIsLoading(true);
-    try {
-      const headers = await authHeaders();
-      const res = await fetch('/api/sheets/setup', {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setSheetUrl(data.url);
-        setSheetConnected(true);
-      }
-    } catch (err) {
-      console.error('Sheet setup failed:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleSyncTo = async () => {
-    setIsLoading(true);
-    try {
-      const headers = await authHeaders();
-      await fetch('/api/sheets/sync-to', {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleSyncFrom = async () => {
-    setIsLoading(true);
-    try {
-      const headers = await authHeaders();
-      const res = await fetch('/api/sheets/sync-from', {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-      });
-      if (res.ok) {
-        await loadSlots();
-        onUpdate();
-      }
-    } finally {
-      setIsLoading(false);
-    }
+  const initMeterForm = (slot: Slot) => {
+    const latest = slot.meterRecords?.[0];
+    setMeterPrevious(String(latest?.reading ?? slot.previousMeterReading ?? 0));
+    setMeterBaseline(String(slot.meterBaselineCredit ?? 0));
+    setMeterReading('');
+    setMeterNote('');
+    setMeterDate(new Date().toISOString().split('T')[0]);
+    setMeterError(null);
   };
 
   const loadContactForm = async (slot: Slot) => {
     const rentalType = slot.rentalType ?? 'monthly';
     const defaultRent = String(rentAmountForType(rentalType, new Date(), rates));
+    initMeterForm(slot);
 
     if (slot.status === 'available') {
       const defaultType = (allowedRentalTypes[0] ?? 'monthly') as RentalType;
@@ -323,6 +178,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
         contactName: '',
         contactPhone: '',
         contactEmail: '',
+        contactAddress: '',
         contactRvType: '',
         contactLicensePlate: '',
         contactEmergency: '',
@@ -330,6 +186,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
         rentalType: defaultType,
         rentAmount: defaultRent,
         balanceDue: defaultRent,
+        paymentMethod: '',
       });
       setFormSaved(false);
       return;
@@ -339,6 +196,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
       contactName: slot.contactName ?? slot.tenantName ?? '',
       contactPhone: slot.contactPhone ?? '',
       contactEmail: slot.contactEmail ?? '',
+      contactAddress: slot.contactAddress ?? '',
       contactRvType: slot.contactRvType ?? '',
       contactLicensePlate: slot.contactLicensePlate ?? '',
       contactEmergency: slot.contactEmergency ?? '',
@@ -346,14 +204,15 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
       rentalType,
       rentAmount: String(slot.rentAmount ?? defaultRent),
       balanceDue: String(slot.balanceDue ?? slot.rentAmount ?? defaultRent),
+      paymentMethod: slot.paymentMethod ?? '',
     };
 
     if (slot.tenantId) {
       setLoadingContact(true);
       try {
         const [tRes, pRes] = await Promise.all([
-          fetch(`/api/tenants/${slot.tenantId}`),
-          fetch(`/api/tenants/${slot.tenantId}/payments`),
+          apiFetch(`/api/tenants/${slot.tenantId}`),
+          apiFetch(`/api/tenants/${slot.tenantId}/payments`),
         ]);
         if (tRes.ok) {
           const tenant = await tRes.json();
@@ -362,6 +221,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
             contactName: form.contactName || tenant.name || '',
             contactPhone: form.contactPhone || tenant.phone || '',
             contactEmail: form.contactEmail || tenant.email || '',
+            contactAddress: form.contactAddress || tenant.address || '',
             contactRvType: form.contactRvType || tenant.rvType || '',
             contactLicensePlate: form.contactLicensePlate || tenant.licensePlate || '',
             contactEmergency: form.contactEmergency || tenant.emergencyContact || '',
@@ -394,6 +254,8 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
       endDate: slot.endDate || '',
       rentalType: slot.rentalType || 'monthly',
       note: slot.notes || '',
+      paymentMethod: slot.paymentMethod || '',
+      markPaid: !!slot.paymentMethod,
     });
     setStatusError(null);
     setStatusPanel(
@@ -406,8 +268,37 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
   const handleSelectSlot = async (slot: Slot) => {
     setSelectedSlot(slot);
     setSiteImageUrlInput('');
+    setSiteDescription(slot.siteDescription ?? '');
+    setSiteDescSaved(false);
     initStatusForm(slot);
     await loadContactForm(slot);
+  };
+
+  const handleSaveSiteDescription = async () => {
+    if (!selectedSlot) return;
+    setIsLoading(true);
+    setUploadError(null);
+    try {
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteDescription: siteDescription.trim() }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        await refreshSelectedSlot(updated);
+        setSiteDescription(updated.siteDescription ?? '');
+        setSiteDescSaved(true);
+        setTimeout(() => setSiteDescSaved(false), 2500);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setUploadError(data.error || 'Could not save site description');
+      }
+    } catch {
+      setUploadError('Network error — could not save description.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const refreshSelectedSlot = async (updated: Slot) => {
@@ -423,7 +314,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     try {
       const form = new FormData();
       form.append('photo', file);
-      const res = await fetch(`/api/slots/${slotId}/photo`, { method: 'POST', body: form });
+      const res = await apiFetch(`/api/slots/${slotId}/photo`, { method: 'POST', body: form });
       if (res.ok) {
         const updated = await res.json();
         await loadSlots();
@@ -456,7 +347,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     if (!selectedSlot || !siteImageUrlInput.trim()) return;
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/slots/${selectedSlot.id}`, {
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageUrl: siteImageUrlInput.trim() }),
@@ -474,7 +365,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     if (!selectedSlot?.imageUrl) return;
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/slots/${selectedSlot.id}/photo`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}/photo`, { method: 'DELETE' });
       if (res.ok) await refreshSelectedSlot(await res.json());
     } finally {
       setIsLoading(false);
@@ -485,7 +376,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     setStatusError(null);
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/slots/${slot.id}`, {
+      const res = await apiFetch(`/api/slots/${slot.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status, ...extra }),
@@ -508,7 +399,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
 
   const handleSaveReservation = async () => {
     if (!selectedSlot) return;
-    const { guestName, startDate, endDate, rentalType, note } = statusForm;
+    const { guestName, startDate, endDate, rentalType, note, markPaid, paymentMethod } = statusForm;
     if (!startDate || !endDate) {
       setStatusError('Check-in and check-out dates are required for a reservation.');
       return;
@@ -517,7 +408,12 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
       setStatusError('Check-out must be after check-in.');
       return;
     }
+    if (markPaid && (rentalType === 'daily' || rentalType === 'weekly') && !paymentMethod.trim()) {
+      setStatusError('Choose a payment method to mark this stay paid for the tax report.');
+      return;
+    }
     const name = guestName.trim() || 'Reserved guest';
+    const rent = rentAmountForType(rentalType, new Date(), rates);
     await handleSlotUpdate(selectedSlot, 'reserved', {
       contactName: name,
       tenantName: name,
@@ -526,6 +422,13 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
       rentalType,
       notes: note.trim() || undefined,
       bookedAt: selectedSlot.bookedAt || new Date().toISOString().split('T')[0],
+      ...(markPaid && (rentalType === 'daily' || rentalType === 'weekly')
+        ? {
+            paymentMethod: paymentMethod.trim(),
+            rentAmount: selectedSlot.rentAmount ?? rent,
+            balanceDue: selectedSlot.balanceDue ?? rent,
+          }
+        : {}),
     });
     setStatusPanel('reserve');
   };
@@ -569,6 +472,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
             contactName: contactForm.contactName,
             contactPhone: contactForm.contactPhone,
             contactEmail: contactForm.contactEmail,
+            contactAddress: contactForm.contactAddress.trim() || undefined,
             contactRvType: contactForm.contactRvType,
             contactLicensePlate: contactForm.contactLicensePlate,
             contactEmergency: contactForm.contactEmergency,
@@ -576,22 +480,33 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
             rentalType: contactForm.rentalType,
             rentAmount: parseFloat(contactForm.rentAmount) || 0,
             balanceDue: parseFloat(contactForm.balanceDue) || 0,
+            // Paid daily/weekly → tax report (server records paid ledger when paymentMethod set)
+            ...(contactForm.paymentMethod.trim()
+              && (contactForm.rentalType === 'daily' || contactForm.rentalType === 'weekly')
+              ? {
+                  paymentMethod: contactForm.paymentMethod.trim(),
+                  bookedAt: selectedSlot.bookedAt || new Date().toISOString().split('T')[0],
+                  startDate: selectedSlot.startDate,
+                  endDate: selectedSlot.endDate,
+                }
+              : {}),
           };
 
-      const res = await fetch(`/api/slots/${selectedSlot.id}`, {
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
       if (selectedSlot.tenantId) {
-        await fetch(`/api/tenants/${selectedSlot.tenantId}`, {
+        await apiFetch(`/api/tenants/${selectedSlot.tenantId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             name: contactForm.contactName,
             phone: contactForm.contactPhone,
             email: contactForm.contactEmail,
+            address: contactForm.contactAddress.trim() || undefined,
             rvType: contactForm.contactRvType,
             licensePlate: contactForm.contactLicensePlate,
             emergencyContact: contactForm.contactEmergency,
@@ -600,7 +515,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
             rentalType: contactForm.rentalType,
           }),
         });
-        await fetch(`/api/tenants/${selectedSlot.tenantId}/payments`, {
+        await apiFetch(`/api/tenants/${selectedSlot.tenantId}/payments`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -624,6 +539,115 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     }
   };
 
+  const handleSaveSlotMeter = async () => {
+    if (!selectedSlot) return;
+    const reading = parseFloat(meterReading);
+    if (!Number.isFinite(reading) || reading < 0) {
+      setMeterError('Enter a valid meter reading (0 or greater).');
+      return;
+    }
+    setMeterSaving(true);
+    setMeterError(null);
+    try {
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}/meter`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reading,
+          date: meterDate,
+          note: meterNote.trim() || undefined,
+          previousReading: meterPrevious === '' ? undefined : parseFloat(meterPrevious) || 0,
+          baselineCredit: parseFloat(meterBaseline) || 0,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setMeterError(data.error || 'Could not save meter reading');
+        return;
+      }
+      const data = await res.json();
+      const updated = data.slot as Slot;
+      setSelectedSlot(updated);
+      initMeterForm(updated);
+      setContactForm(prev => ({
+        ...prev,
+        balanceDue: String(updated.balanceDue ?? prev.balanceDue),
+      }));
+      await loadSlots();
+      onUpdate();
+    } catch {
+      setMeterError('Network error — could not save meter reading.');
+    } finally {
+      setMeterSaving(false);
+    }
+  };
+
+  const handleSaveMeterBaseline = async () => {
+    if (!selectedSlot) return;
+    const baseline = parseFloat(meterBaseline);
+    if (!Number.isFinite(baseline) || baseline < 0) {
+      setMeterError('Included kWh must be 0 or greater.');
+      return;
+    }
+    setMeterSaving(true);
+    setMeterError(null);
+    try {
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}/meter/baseline`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baselineCredit: baseline }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setMeterError(data.error || 'Could not save included kWh');
+        return;
+      }
+      const data = await res.json();
+      const updated = data.slot as Slot;
+      setSelectedSlot(updated);
+      setContactForm(prev => ({
+        ...prev,
+        balanceDue: String(updated.balanceDue ?? prev.balanceDue),
+      }));
+      await loadSlots();
+    } catch {
+      setMeterError('Network error — could not save included kWh.');
+    } finally {
+      setMeterSaving(false);
+    }
+  };
+
+  const handleDeleteSlotMeter = async (record: MeterRecord) => {
+    if (!selectedSlot) return;
+    if (!window.confirm(`Delete meter reading from ${record.date}? Overage will be recalculated.`)) return;
+    setMeterSaving(true);
+    setMeterError(null);
+    try {
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}/meter/${record.id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setMeterError(data.error || 'Could not delete meter record');
+        return;
+      }
+      const data = await res.json();
+      const updated = data.slot as Slot;
+      setSelectedSlot(updated);
+      initMeterForm(updated);
+      setContactForm(prev => ({
+        ...prev,
+        balanceDue: String(updated.balanceDue ?? prev.balanceDue),
+      }));
+      await loadSlots();
+      onUpdate();
+    } catch {
+      setMeterError('Network error — could not delete meter record.');
+    } finally {
+      setMeterSaving(false);
+    }
+  };
+
   const handleRemoveTenant = async () => {
     if (!selectedSlot) return;
     const name = selectedSlot.tenantName || selectedSlot.contactName || contactForm.contactName || 'this tenant';
@@ -632,7 +656,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     }
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/slots/${selectedSlot.id}/remove-tenant`, { method: 'POST' });
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}/remove-tenant`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         setSelectedSlot(data.slot ?? null);
@@ -653,7 +677,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     if (!selectedSlot || !contactForm.contactName.trim()) return;
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/slots/${selectedSlot.id}/add-tenant`, {
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}/add-tenant`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -663,7 +687,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
         }),
       });
       if (res.ok) {
-        await fetch('/api/customers/upsert', {
+        await apiFetch('/api/customers/upsert', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -687,6 +711,89 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
     }
   };
 
+  /** Occupied/reserved guest can become or switch to monthly or weekly tenant */
+  const canSetTenantRental = (() => {
+    if (!selectedSlot) return false;
+    if (selectedSlot.status === 'available' || selectedSlot.status === 'maintenance') return false;
+    return !!(
+      selectedSlot.contactName
+      || selectedSlot.tenantName
+      || contactForm.contactName.trim()
+      || selectedSlot.tenantId
+    );
+  })();
+
+  const currentSlotRental =
+    selectedSlot?.rentalType
+    || contactForm.rentalType
+    || (selectedSlot?.tenantId ? 'monthly' : undefined);
+
+  const handleSetTenantRental = async (target: 'monthly' | 'weekly') => {
+    if (!selectedSlot || !canSetTenantRental) return;
+    const name =
+      contactForm.contactName.trim() ||
+      selectedSlot.contactName ||
+      selectedSlot.tenantName ||
+      'Guest';
+    const prior = currentSlotRental || 'short-term/reserved';
+    if (prior === target && selectedSlot.tenantId) {
+      setStatusError(`Already a ${target} tenant. Change Rental Type and Save, or pick the other type.`);
+      return;
+    }
+    const rent = rentAmountForType(target, new Date(), rates);
+    if (
+      !window.confirm(
+        `Set ${name} as a ${target} tenant on ${selectedSlot.label}?\n\n` +
+          `Current: ${prior}\n` +
+          `${target === 'monthly' ? 'Monthly' : 'Weekly'} rent: $${rent.toFixed(2)} (editable after).\n` +
+          'Contact info, stay dates, meters, and card references are kept.'
+      )
+    ) {
+      return;
+    }
+    setIsLoading(true);
+    setStatusError(null);
+    try {
+      const res = await apiFetch(`/api/slots/${selectedSlot.id}/convert-to-tenant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contactName: contactForm.contactName.trim() || name,
+          contactPhone: contactForm.contactPhone,
+          contactEmail: contactForm.contactEmail,
+          contactAddress: contactForm.contactAddress,
+          contactRvType: contactForm.contactRvType,
+          contactLicensePlate: contactForm.contactLicensePlate,
+          contactEmergency: contactForm.contactEmergency,
+          contactNotes: contactForm.contactNotes,
+          rentalType: target,
+          rentAmount: rent,
+          balanceDue: rent,
+          startDate: selectedSlot.startDate || contactForm.startDate || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatusError(data.error || `Could not set ${target} tenant`);
+        return;
+      }
+      await loadCustomers();
+      await loadSlots();
+      onUpdate();
+      if (data.slot) {
+        setSelectedSlot(data.slot);
+        await loadContactForm(data.slot);
+      } else {
+        setSelectedSlot(null);
+      }
+      window.alert(data.message || `${name} is now a ${target} tenant on ${selectedSlot.label}.`);
+    } catch {
+      setStatusError('Network error — could not update tenant rental type.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -696,180 +803,19 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
             {available} of 25 spots available
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {sheetUrl && (
-            <a
-              href={sheetUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 text-sm bg-white border border-[#E2D9D0] text-[#5A6355] px-4 py-2 rounded-xl hover:bg-[#FBF9F7] transition"
-            >
-              <ExternalLink className="w-4 h-4" />
-              Open Google Sheet
-            </a>
-          )}
-          {sheetConnected && token && (
-            <>
-              <button
-                onClick={handleSyncTo}
-                disabled={isLoading}
-                className="flex items-center gap-2 text-sm bg-[#5A6355] text-white px-4 py-2 rounded-xl hover:bg-[#3D3730] transition disabled:opacity-50"
-              >
-                <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-                Push to Sheets
-              </button>
-              <button
-                onClick={handleSyncFrom}
-                disabled={isLoading}
-                className="flex items-center gap-2 text-sm bg-[#C29474] text-white px-4 py-2 rounded-xl hover:bg-[#A87A5E] transition disabled:opacity-50"
-              >
-                <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-                Pull from Sheets
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-
-      {!token ? (
-        <div className="bg-white rounded-[32px] p-8 shadow-sm border border-[#E2D9D0] text-center max-w-2xl">
-          <div className="w-16 h-16 bg-[#EDE7E1] text-[#5A6355] rounded-full flex items-center justify-center mx-auto mb-6 border border-[#E2D9D0]">
-            <Grid3x3 className="w-8 h-8" />
-          </div>
-          <h3 className="text-xl font-serif text-[#3D3730] mb-3">Connect Google Account</h3>
-          <p className="text-[#5A6355] mb-8 text-sm leading-relaxed">
-            Sign in with the manager&apos;s Google account to sync site data in Google Sheets and connect numbered receipt pages in Google Docs.
-          </p>
-          <button
-            onClick={handleGoogleSignIn}
-            disabled={isLoading}
-            className="flex items-center gap-3 bg-white border border-[#E2D9D0] text-[#3D3730] px-6 py-3 rounded-xl text-sm font-semibold hover:bg-[#FBF9F7] transition shadow-sm mx-auto"
-          >
-            {isLoading ? (
-              <RefreshCw className="w-5 h-5 animate-spin" />
-            ) : (
-              <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-5 h-5">
-                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
-                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
-                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
-                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
-              </svg>
-            )}
-            Sign in with Google
-          </button>
-        </div>
-      ) : !sheetConnected ? (
-        <div className="bg-white rounded-[32px] p-8 shadow-sm border border-[#E2D9D0] text-center max-w-2xl">
-          <h3 className="text-xl font-serif text-[#3D3730] mb-3">Create Your Site Database</h3>
-          <p className="text-[#5A6355] mb-6 text-sm">
-            This will create a Google Sheet with all 25 sites that you can edit anytime.
-          </p>
-          <button
-            onClick={handleSetupSheet}
-            disabled={isLoading}
-            className="bg-[#5A6355] text-white px-6 py-3 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50"
-          >
-            {isLoading ? 'Creating...' : 'Create Google Sheet Database'}
-          </button>
-          <button onClick={logout} className="mt-4 flex items-center justify-center gap-2 text-xs text-red-500 hover:bg-red-50 px-4 py-2 rounded-xl transition mx-auto">
-            <LogOut className="w-3 h-3" /> Sign out
-          </button>
-        </div>
-      ) : null}
-
-      <div className="bg-white rounded-[32px] p-6 shadow-sm border border-[#E2D9D0]">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 bg-[#EDE7E1] rounded-xl flex items-center justify-center">
-            <FileText className="w-5 h-5 text-[#5A6355]" />
-          </div>
-          <div className="flex-1">
-            <h3 className="text-sm font-serif text-[#3D3730]">Numbered Receipt Google Doc</h3>
-            <p className="text-xs text-[#5A6355]">Connect a Google Doc from the manager account — each space opens its matching page number</p>
-          </div>
-          {receiptConnected && receiptDocUrl && (
-            <a
-              href={receiptDocUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 text-xs bg-[#FBF9F7] border border-[#E2D9D0] text-[#5A6355] px-3 py-2 rounded-xl hover:bg-white transition"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              Open Doc
-            </a>
-          )}
-        </div>
-
-        {token ? (
-          <div className="flex flex-wrap gap-2 mb-4">
-            <button
-              onClick={handleCreateReceiptDoc}
-              disabled={isLoading}
-              className="flex items-center gap-2 text-sm bg-[#5A6355] text-white px-4 py-2 rounded-xl hover:bg-[#3D3730] transition disabled:opacity-50"
-            >
-              <FileText className="w-4 h-4" />
-              Create Receipt Doc
-            </button>
-            <button
-              onClick={handleLoadReceiptDocs}
-              disabled={isLoading}
-              className="flex items-center gap-2 text-sm bg-white border border-[#E2D9D0] text-[#5A6355] px-4 py-2 rounded-xl hover:bg-[#FBF9F7] transition disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-              Browse My Docs
-            </button>
-          </div>
-        ) : (
-          <p className="text-xs text-[#5A6355] mb-4">
-            Sign in with Google above to create or browse receipt documents under the manager account.
-          </p>
-        )}
-
-        {receiptDocs.length > 0 && (
-          <div className="flex flex-col sm:flex-row gap-3 mb-4">
-            <select
-              value={selectedReceiptDocId}
-              onChange={e => setSelectedReceiptDocId(e.target.value)}
-              className="flex-1 px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
-            >
-              {receiptDocs.map(doc => (
-                <option key={doc.id} value={doc.id}>{doc.name}</option>
-              ))}
-            </select>
-            <button
-              onClick={handleConnectReceiptDoc}
-              disabled={isLoading || !selectedReceiptDocId}
-              className="flex items-center justify-center gap-2 bg-[#C29474] text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-[#A87A5E] transition disabled:opacity-50"
-            >
-              <LinkIcon className="w-4 h-4" />
-              Connect Doc
-            </button>
-          </div>
-        )}
-
-        <div className="flex flex-col sm:flex-row gap-3">
-          <input
-            type="url"
-            value={receiptDocUrl}
-            onChange={e => setReceiptDocUrl(e.target.value)}
-            placeholder="Or paste a Google Doc URL (https://docs.google.com/document/d/...)"
-            className="flex-1 px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
-          />
-          <button
-            onClick={handleSaveReceiptDoc}
-            disabled={isLoading || !receiptDocUrl}
-            className="flex items-center justify-center gap-2 bg-[#5A6355] text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50"
-          >
-            <Save className="w-4 h-4" />
-            Link by URL
-          </button>
-        </div>
-
-        {receiptConnected && (
-          <p className="text-xs text-[#3D5A3D] mt-3">Receipt doc linked — each space opens its numbered page.</p>
-        )}
-        {receiptError && (
-          <p className="text-xs text-red-600 mt-3">{receiptError}</p>
-        )}
+        <button
+          type="button"
+          onClick={() => {
+            void loadSlots();
+            void loadCustomers();
+            onUpdate();
+          }}
+          disabled={isLoading}
+          className="flex items-center gap-2 text-sm bg-white border border-[#E2D9D0] text-[#5A6355] px-4 py-2 rounded-xl hover:bg-[#FBF9F7] transition disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
       </div>
 
       <input
@@ -939,6 +885,11 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
               {slot.status === 'reserved' && slot.startDate && slot.endDate && (
                 <div className="text-[10px] mt-1 opacity-70 leading-snug">
                   {formatStayDate(slot.startDate)} – {formatStayDate(slot.endDate)}
+                </div>
+              )}
+              {slot.status === 'available' && slot.siteDescription && (
+                <div className="text-[10px] mt-1.5 opacity-80 leading-snug line-clamp-2">
+                  {slot.siteDescription}
                 </div>
               )}
               {slot.status === 'maintenance' && slot.notes && (
@@ -1092,6 +1043,41 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                 </div>
               )}
 
+              <div>
+                <h4 className="text-sm font-serif text-[#3D3730] border-b border-[#E2D9D0] pb-2 mb-3">
+                  Site description
+                </h4>
+                <p className="text-xs text-[#5A6355] mb-3">
+                  Short note about this pad (hookups, shade, pull-through, near bathhouse, etc.).
+                  Saved on the site itself — not cleared when a guest leaves.
+                </p>
+                <textarea
+                  value={siteDescription}
+                  onChange={(e) => {
+                    setSiteDescription(e.target.value.slice(0, 500));
+                    setSiteDescSaved(false);
+                  }}
+                  rows={3}
+                  maxLength={500}
+                  placeholder="e.g. 50 amp · pull-through · level pad · near laundry"
+                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm resize-none focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                />
+                <div className="flex items-center justify-between gap-3 mt-2">
+                  <span className="text-[10px] text-[#5A6355]">
+                    {siteDescription.length}/500
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleSaveSiteDescription}
+                    disabled={isLoading}
+                    className="flex items-center gap-2 bg-[#5A6355] text-white px-4 py-2 rounded-xl text-sm font-semibold hover:bg-[#3D3730] disabled:opacity-50 transition"
+                  >
+                    <Save className="w-4 h-4" />
+                    {siteDescSaved ? 'Saved' : 'Save description'}
+                  </button>
+                </div>
+              </div>
+
               {loadingContact ? (
                 <div className="py-8 text-center text-sm text-[#5A6355]">Loading contact & payment info…</div>
               ) : (
@@ -1118,6 +1104,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                             contactName: '',
                             contactPhone: '',
                             contactEmail: '',
+                            contactAddress: '',
                             contactRvType: '',
                             contactLicensePlate: '',
                             contactEmergency: '',
@@ -1140,6 +1127,7 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                         <p className="font-medium text-[#3D3730]">{contactForm.contactName}</p>
                         {contactForm.contactPhone && <p className="text-[#5A6355]">{contactForm.contactPhone}</p>}
                         {contactForm.contactEmail && <p className="text-[#5A6355]">{contactForm.contactEmail}</p>}
+                        {contactForm.contactAddress && <p className="text-[#5A6355]">{contactForm.contactAddress}</p>}
                         {contactForm.contactRvType && <p className="text-[#5A6355]">{contactForm.contactRvType}</p>}
                       </div>
                     )}
@@ -1173,6 +1161,15 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                         value={contactForm.contactEmail}
                         onChange={e => { setContactForm(prev => ({ ...prev, contactEmail: e.target.value })); setFormSaved(false); }}
                         placeholder="Email address"
+                        className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+                    <div className="space-y-2 sm:col-span-2">
+                      <label className="text-xs uppercase tracking-widest text-[#5A6355]">Address</label>
+                      <input
+                        value={contactForm.contactAddress}
+                        onChange={e => { setContactForm(prev => ({ ...prev, contactAddress: e.target.value })); setFormSaved(false); }}
+                        placeholder="Street, city, state, ZIP"
                         className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
                       />
                     </div>
@@ -1254,6 +1251,31 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                         className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
                       />
                     </div>
+                    {(contactForm.rentalType === 'daily' || contactForm.rentalType === 'weekly') && (
+                      <div className="space-y-2 sm:col-span-3">
+                        <label className="text-xs uppercase tracking-widest text-[#5A6355]">
+                          Payment method (sets paid on tax report)
+                        </label>
+                        <select
+                          value={contactForm.paymentMethod}
+                          onChange={e => {
+                            setContactForm(prev => ({ ...prev, paymentMethod: e.target.value }));
+                            setFormSaved(false);
+                          }}
+                          className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                        >
+                          <option value="">Not paid yet</option>
+                          <option value="Cash">Cash</option>
+                          <option value="Card">Card</option>
+                          <option value="Check">Check</option>
+                          <option value="Venmo">Venmo</option>
+                          <option value="Zelle">Zelle</option>
+                        </select>
+                        <p className="text-[11px] text-[#5A6355]">
+                          For daily/weekly stays: choose a method and Save to add this stay to the tax report.
+                        </p>
+                      </div>
+                    )}
                     <div className="space-y-2">
                       <label className="text-xs uppercase tracking-widest text-[#5A6355]">Balance Due ($)</label>
                       <input
@@ -1267,6 +1289,218 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                     </div>
                   </div>
                 </div>
+
+                {/* Weekly meter / electric overage */}
+                {contactForm.rentalType === 'weekly' && selectedSlot.status !== 'available' && (
+                  <div className="rounded-2xl border border-[#E2D9D0] bg-[#FBF9F7] p-4 sm:p-5 space-y-4">
+                    <div className="flex items-start gap-3">
+                      <div className="w-9 h-9 rounded-xl bg-white border border-[#E2D9D0] flex items-center justify-center shrink-0">
+                        <Gauge className="w-4 h-4 text-[#5A6355]" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-serif text-[#3D3730]">Meter reading — weekly overage</h4>
+                        <p className="text-xs text-[#5A6355] mt-1">
+                          Record kWh for this weekly stay. Overage = max(0, usage − included kWh) × ${KWH_RATE.toFixed(2)}/kWh,
+                          then added to balance due with rent.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Previous (kWh)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={meterPrevious}
+                          onChange={e => setMeterPrevious(e.target.value)}
+                          className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">New reading (kWh)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={meterReading}
+                          onChange={e => setMeterReading(e.target.value)}
+                          placeholder="e.g. 12450"
+                          className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Date</label>
+                        <input
+                          type="date"
+                          value={meterDate}
+                          onChange={e => setMeterDate(e.target.value)}
+                          className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Included kWh</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={meterBaseline}
+                            onChange={e => setMeterBaseline(e.target.value)}
+                            className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleSaveMeterBaseline}
+                            disabled={meterSaving}
+                            className="shrink-0 px-3 py-2 rounded-xl text-xs font-semibold border border-[#E2D9D0] bg-white text-[#5A6355] hover:bg-[#F0EBE6] disabled:opacity-50"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Note (optional)</label>
+                      <input
+                        type="text"
+                        value={meterNote}
+                        onChange={e => setMeterNote(e.target.value)}
+                        placeholder="e.g. End of week reading"
+                        className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                      />
+                    </div>
+
+                    {(() => {
+                      const prev = parseFloat(meterPrevious) || 0;
+                      const next = parseFloat(meterReading);
+                      const usage = Number.isFinite(next) ? Math.max(0, next - prev) : (selectedSlot.currentMeterUsage ?? 0);
+                      const baseline = parseFloat(meterBaseline) || 0;
+                      const net = Math.max(0, usage - baseline);
+                      const overage = Math.round(net * KWH_RATE * 100) / 100;
+                      const rent = parseFloat(contactForm.rentAmount) || 0;
+                      return (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                          <div className="rounded-xl bg-white border border-[#E2D9D0] px-3 py-2">
+                            <p className="text-[10px] uppercase tracking-widest text-[#5A6355]">Usage</p>
+                            <p className="font-medium text-[#3D3730]">{usage.toLocaleString()} kWh</p>
+                          </div>
+                          <div className="rounded-xl bg-white border border-[#E2D9D0] px-3 py-2">
+                            <p className="text-[10px] uppercase tracking-widest text-[#5A6355]">Billable</p>
+                            <p className="font-medium text-[#3D3730]">{net.toLocaleString()} kWh</p>
+                          </div>
+                          <div className="rounded-xl bg-white border border-[#E2D9D0] px-3 py-2">
+                            <p className="text-[10px] uppercase tracking-widest text-[#5A6355]">Overage</p>
+                            <p className="font-medium text-[#C29474]">{formatCurrency(overage)}</p>
+                          </div>
+                          <div className="rounded-xl bg-white border border-[#E2D9D0] px-3 py-2">
+                            <p className="text-[10px] uppercase tracking-widest text-[#5A6355]">Rent + overage</p>
+                            <p className="font-medium text-[#3D3730]">{formatCurrency(rent + overage)}</p>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    <button
+                      type="button"
+                      onClick={handleSaveSlotMeter}
+                      disabled={meterSaving || !meterReading}
+                      className="flex items-center justify-center gap-2 bg-[#5A6355] text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50 w-full sm:w-auto"
+                    >
+                      <Gauge className="w-4 h-4" />
+                      {meterSaving ? 'Saving…' : 'Save meter reading'}
+                    </button>
+
+                    {meterError && (
+                      <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{meterError}</p>
+                    )}
+
+                    {(selectedSlot.meterRecords?.length ?? 0) > 0 && (
+                      <div className="space-y-2 pt-2 border-t border-[#E2D9D0]">
+                        <p className="text-[10px] uppercase tracking-widest text-[#5A6355] font-semibold">Meter history</p>
+                        <ul className="space-y-1.5">
+                          {(selectedSlot.meterRecords ?? []).map(record => (
+                            <li
+                              key={record.id}
+                              className="flex flex-wrap items-center justify-between gap-2 text-xs bg-white border border-[#E2D9D0] rounded-xl px-3 py-2"
+                            >
+                              <span className="text-[#3D3730]">
+                                {record.date} · {record.previousReading.toLocaleString()} → {record.reading.toLocaleString()} ·{' '}
+                                <strong>{record.usage.toLocaleString()} kWh</strong>
+                                {record.note ? ` · ${record.note}` : ''}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSlotMeter(record)}
+                                disabled={meterSaving}
+                                className="text-red-600 hover:underline font-semibold disabled:opacity-50"
+                              >
+                                Delete
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                        {(selectedSlot.meterOverageCharge ?? 0) > 0 && (
+                          <p className="text-xs text-[#5A6355]">
+                            Current overage on site:{' '}
+                            <strong className="text-[#C29474]">
+                              {formatCurrency(selectedSlot.meterOverageCharge ?? 0)}
+                            </strong>
+                            {' '}· Balance due includes rent + overage
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {canSetTenantRental && (
+                  <div className="rounded-2xl border-2 border-[#C29474] bg-[#FBF9F7] p-4 space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="w-9 h-9 rounded-xl bg-white border border-[#E2D9D0] flex items-center justify-center shrink-0">
+                        <UserPlus className="w-4 h-4 text-[#C29474]" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-serif text-[#3D3730]">
+                          Tenant rental type
+                        </h4>
+                        <p className="text-xs text-[#5A6355] mt-1">
+                          Set this guest as a <strong>monthly</strong> or <strong>weekly</strong>{' '}
+                          tenant. Contact, stay dates, meters, and card refs are kept. Current type:{' '}
+                          <strong className="capitalize">{currentSlotRental || 'unknown'}</strong>.
+                          {' '}Monthly ${rentAmountForType('monthly', new Date(), rates).toFixed(2)} ·
+                          Weekly ${rentAmountForType('weekly', new Date(), rates).toFixed(2)}.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      {allowedRentalTypes.includes('monthly') && currentSlotRental !== 'monthly' && (
+                        <button
+                          type="button"
+                          onClick={() => handleSetTenantRental('monthly')}
+                          disabled={isLoading}
+                          className="flex-1 flex items-center justify-center gap-2 bg-[#C29474] text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-[#A87A5E] transition disabled:opacity-50"
+                        >
+                          <UserPlus className="w-4 h-4" />
+                          {isLoading ? 'Updating…' : 'Set as monthly tenant'}
+                        </button>
+                      )}
+                      {allowedRentalTypes.includes('weekly') && currentSlotRental !== 'weekly' && (
+                        <button
+                          type="button"
+                          onClick={() => handleSetTenantRental('weekly')}
+                          disabled={isLoading}
+                          className="flex-1 flex items-center justify-center gap-2 bg-[#5A6355] text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50"
+                        >
+                          <UserPlus className="w-4 h-4" />
+                          {isLoading ? 'Updating…' : 'Set as weekly tenant'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex flex-col sm:flex-row gap-3">
                   <button
@@ -1298,6 +1532,34 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                     </button>
                   )}
                 </div>
+
+                {selectedSlot.tenantId && (selectedSlot.status === 'occupied' || selectedSlot.status === 'reserved') && (
+                  <EarlyDeparturePanel
+                    compact
+                    tenantId={selectedSlot.tenantId}
+                    tenantName={selectedSlot.tenantName || contactForm.contactName}
+                    defaultPreviousReading={Number(selectedSlot.previousMeterReading) || 0}
+                    defaultDepartureDate={
+                      selectedSlot.endDate && selectedSlot.endDate !== 'ongoing'
+                        ? selectedSlot.endDate
+                        : new Date().toISOString().split('T')[0]
+                    }
+                    onApplied={async () => {
+                      await loadSlots();
+                      onUpdate();
+                      const res = await apiFetch('/api/slots');
+                      if (res.ok) {
+                        const data = await res.json();
+                        const slotsList = Array.isArray(data) ? data : data.slots ?? [];
+                        const updated = slotsList.find((s: Slot) => s.id === selectedSlot.id);
+                        if (updated) {
+                          setSelectedSlot(updated);
+                          await loadContactForm(updated);
+                        }
+                      }
+                    }}
+                  />
+                )}
                 </>
               )}
             </div>
@@ -1405,6 +1667,39 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
                         className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm"
                       />
                     </div>
+                    {(statusForm.rentalType === 'daily' || statusForm.rentalType === 'weekly') && (
+                      <div className="sm:col-span-2 space-y-2 rounded-xl border border-[#C29474]/40 bg-white/70 p-3">
+                        <label className="flex items-center gap-2 text-sm text-[#3D3730] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={statusForm.markPaid}
+                            onChange={e => setStatusForm(p => ({
+                              ...p,
+                              markPaid: e.target.checked,
+                              paymentMethod: e.target.checked ? (p.paymentMethod || 'Cash') : '',
+                            }))}
+                            className="rounded border-[#E2D9D0]"
+                          />
+                          Mark paid — add to tax report
+                        </label>
+                        {statusForm.markPaid && (
+                          <div className="space-y-1">
+                            <label className="text-[10px] uppercase tracking-widest text-[#4A3D6B]/80">Payment method</label>
+                            <select
+                              value={statusForm.paymentMethod}
+                              onChange={e => setStatusForm(p => ({ ...p, paymentMethod: e.target.value }))}
+                              className="w-full px-3 py-2.5 bg-white border border-[#E2D9D0] rounded-xl text-sm"
+                            >
+                              <option value="Cash">Cash</option>
+                              <option value="Card">Card</option>
+                              <option value="Check">Check</option>
+                              <option value="Venmo">Venmo</option>
+                              <option value="Zelle">Zelle</option>
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -1456,11 +1751,6 @@ export function SitesWidget({ onUpdate }: { onUpdate: () => void }) {
               )}
             </div>
 
-            {receiptConnected && (
-              <div className="mt-4">
-                <ReceiptLink spaceNumber={String(selectedSlot.number)} variant="button" />
-              </div>
-            )}
             <button onClick={() => setSelectedSlot(null)} className="mt-4 w-full text-sm text-[#5A6355] hover:text-[#3D3730] py-2">
               Close
             </button>

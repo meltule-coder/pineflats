@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { CustomerComment } from '../types';
+import { atomicWriteJson } from './persist';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const COMMENTS_FILE = path.join(DATA_DIR, 'comments.json');
@@ -14,7 +15,7 @@ function ensureDataDir() {
 export function getComments(): CustomerComment[] {
   ensureDataDir();
   if (!fs.existsSync(COMMENTS_FILE)) {
-    fs.writeFileSync(COMMENTS_FILE, '[]');
+    atomicWriteJson(COMMENTS_FILE, []);
     return [];
   }
   const list = JSON.parse(fs.readFileSync(COMMENTS_FILE, 'utf-8')) as CustomerComment[];
@@ -23,7 +24,7 @@ export function getComments(): CustomerComment[] {
 
 function saveComments(comments: CustomerComment[]) {
   ensureDataDir();
-  fs.writeFileSync(COMMENTS_FILE, JSON.stringify(comments, null, 2));
+  atomicWriteJson(COMMENTS_FILE, comments);
 }
 
 function nextCommentId(): string {

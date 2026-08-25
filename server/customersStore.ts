@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { StoredCustomer } from '../types';
+import { atomicWriteJson } from './persist';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const CUSTOMERS_FILE = path.join(DATA_DIR, 'customers.json');
@@ -14,7 +15,7 @@ function ensureDataDir() {
 export function getCustomers(): StoredCustomer[] {
   ensureDataDir();
   if (!fs.existsSync(CUSTOMERS_FILE)) {
-    fs.writeFileSync(CUSTOMERS_FILE, '[]');
+    atomicWriteJson(CUSTOMERS_FILE, []);
     return [];
   }
   return JSON.parse(fs.readFileSync(CUSTOMERS_FILE, 'utf-8'));
@@ -22,7 +23,7 @@ export function getCustomers(): StoredCustomer[] {
 
 export function saveCustomers(customers: StoredCustomer[]) {
   ensureDataDir();
-  fs.writeFileSync(CUSTOMERS_FILE, JSON.stringify(customers, null, 2));
+  atomicWriteJson(CUSTOMERS_FILE, customers);
 }
 
 export function nextCustomerId(): string {

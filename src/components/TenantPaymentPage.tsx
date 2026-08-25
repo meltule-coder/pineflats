@@ -1,16 +1,22 @@
-import { useEffect, useState } from 'react';
+import { apiFetch } from '../lib/api';
+import { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, DollarSign, Calendar, CreditCard, Plus, CheckCircle2, Receipt, Gauge,
-  Pencil, Save, X, Trash2
+  Pencil, Save, X, Trash2, Loader2, Zap, Lock
 } from 'lucide-react';
-import { Tenant, TenantPayment, MeterRecord, ExtraCharge, PaymentCredit, SavedPaymentCard } from '../../types';
+import {
+  Tenant, TenantPayment, MeterRecord, ExtraCharge, PaymentCredit, SavedPaymentCard, PaymentCardRef,
+} from '../../types';
 import {
   DEFAULT_RENTAL_RATES,
   dailyRateLabel, formatDailyRateDescription, rentAmountForType, prorateMonthlyRent,
   type RentalRatesConfig,
 } from '../../rentUtils';
-import { fetchActiveRates } from '../lib/activeRates';
+import { fetchActiveRates, subscribeActiveRates } from '../lib/activeRates';
 import { ReceiptLink } from './ReceiptLink';
+import { EarlyDeparturePanel } from './EarlyDeparturePanel';
+import { CloverCardIframe, type CloverCardIframeHandle } from './CloverCardIframe';
+import type { CloverPublicConfig } from '../lib/clover';
 
 interface TenantPaymentPageProps {
   tenant: Tenant;
@@ -67,19 +73,29 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     description: '',
     note: '',
   });
-  const [cardForm, setCardForm] = useState({
-    cardholderName: '',
-    last4: '',
-    brand: 'Card',
-    expMonth: '',
-    expYear: '',
-    billingZip: '',
-    label: '',
-    notes: '',
-    isDefault: true,
-  });
   const [cardError, setCardError] = useState('');
   const [cardSuccess, setCardSuccess] = useState('');
+  const [cardAmount, setCardAmount] = useState('');
+  const [cardNote, setCardNote] = useState('');
+  const [cardDate, setCardDate] = useState(new Date().toISOString().split('T')[0]);
+  /** processor = try payment processor; terminal = confirm after card run elsewhere */
+  const [cardMode, setCardMode] = useState<'processor' | 'terminal'>('terminal');
+  const [cardInitiating, setCardInitiating] = useState(false);
+  const [processorReady, setProcessorReady] = useState(false);
+  const [processorLabel, setProcessorLabel] = useState('Not connected');
+  /** Public Clover PAKMS config for hosted iframe charges */
+  const [cloverCheckout, setCloverCheckout] = useState<CloverPublicConfig | null>(null);
+  const cloverRef = useRef<CloverCardIframeHandle>(null);
+  /** Shared vault cards (brand + last4) for this guest — renewals (reference only, not chargeable tokens) */
+  const [vaultCards, setVaultCards] = useState<PaymentCardRef[]>([]);
+  const [selectedVaultCardId, setSelectedVaultCardId] = useState<string>('');
+  // Card entry for terminal mode (last4 reference) — never sent as full PAN to charge API
+  const [ccName, setCcName] = useState('');
+  const [ccNumber, setCcNumber] = useState('');
+  const [ccExpMonth, setCcExpMonth] = useState('');
+  const [ccExpYear, setCcExpYear] = useState('');
+  const [ccCvv, setCcCvv] = useState('');
+  const [ccZip, setCcZip] = useState('');
   const [editingChargeId, setEditingChargeId] = useState<string | null>(null);
   const [editChargeForm, setEditChargeForm] = useState({
     amount: '',
@@ -90,7 +106,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
   const [rates, setRates] = useState<RentalRatesConfig>(DEFAULT_RENTAL_RATES);
 
   const loadPayment = async (activeRates: RentalRatesConfig = rates) => {
-    const res = await fetch(`/api/tenants/${tenant.id}/payments`);
+    const res = await apiFetch(`/api/tenants/${tenant.id}/payments`);
     if (res.ok) {
       const data: TenantPayment = await res.json();
       setPayment(data);
@@ -99,7 +115,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
         const resolvedRent = rentAmountForType('daily', new Date(), activeRates);
         setRentAmount(String(resolvedRent));
         if (resolvedRent !== data.rentAmount) {
-          await fetch(`/api/tenants/${tenant.id}/payments`, {
+          await apiFetch(`/api/tenants/${tenant.id}/payments`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ rentAmount: resolvedRent }),
@@ -121,17 +137,37 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
       const autoPrevious = data.meterRecords?.[0]?.reading ?? data.previousMeterReading ?? 0;
       setPreviousMeterReading(String(autoPrevious));
     }
+    // Load shared vault cards matching this guest (renewals)
+    try {
+      const params = new URLSearchParams({ tenantId: tenant.id });
+      if (tenant.email) params.set('email', tenant.email);
+      if (tenant.name) params.set('name', tenant.name);
+      const vaultRes = await apiFetch(`/api/card-refs?${params.toString()}`);
+      if (vaultRes.ok) {
+        const vaultData = await vaultRes.json();
+        setVaultCards(Array.isArray(vaultData.cards) ? vaultData.cards : []);
+      }
+    } catch {
+      /* ignore */
+    }
   };
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      const activeRates = await fetchActiveRates();
+    const load = async () => {
+      const activeRates = await fetchActiveRates({ force: true });
       if (cancelled) return;
       setRates(activeRates);
       await loadPayment(activeRates);
-    })();
-    return () => { cancelled = true; };
+    };
+    load();
+    const unsub = subscribeActiveRates(() => {
+      void load();
+    });
+    return () => {
+      cancelled = true;
+      unsub();
+    };
   }, [tenant.id]);
 
   useEffect(() => {
@@ -203,6 +239,259 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
   const chargesTotal = periodCharges;
   const totalPaid = periodPaid;
 
+  // Prefill card charge amount with balance due when tenant payment data loads
+  useEffect(() => {
+    if (balanceDue > 0) {
+      setCardAmount(prev => (prev === '' || prev === '0' ? balanceDue.toFixed(2) : prev));
+    }
+  }, [tenant.id, balanceDue]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      apiFetch('/api/payment-processor/status').then(res => (res.ok ? res.json() : null)),
+      // Public checkout info includes PAKMS key for Clover iframe (safe for browser)
+      apiFetch('/api/public/payment-processor').then(res => (res.ok ? res.json() : null)),
+    ])
+      .then(([status, checkout]) => {
+        if (cancelled) return;
+        if (status) {
+          setProcessorReady(Boolean(status.ready || status.connected));
+          const provider = status.provider || 'none';
+          const labels: Record<string, string> = {
+            none: 'Not connected',
+            clover: 'Clover',
+            stripe: 'Stripe',
+            square: 'Square',
+            other: 'Custom processor',
+          };
+          setProcessorLabel(
+            status.ready
+              ? `${labels[provider] || provider} · ready`
+              : status.connected
+                ? `${labels[provider] || provider} · setup pending`
+                : 'Not connected'
+          );
+          if (status.ready) setCardMode('processor');
+        }
+        if (checkout) {
+          setCloverCheckout(checkout as CloverPublicConfig);
+          if (checkout.ready) {
+            setProcessorReady(true);
+            setProcessorLabel(
+              checkout.testMode
+                ? `${checkout.displayName || 'Clover'} · sandbox ready`
+                : `${checkout.displayName || 'Clover'} · ready`
+            );
+            setCardMode('processor');
+          }
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const isFirstPayment = !(payment?.records?.length);
+  const needsCardEntry = isFirstPayment || !(payment?.savedCards?.length);
+
+  const digitsOnly = (v: string) => v.replace(/\D/g, '');
+  const formatCardNumber = (value: string) => {
+    const d = digitsOnly(value).slice(0, 19);
+    if (/^3[47]/.test(d)) {
+      return [d.slice(0, 4), d.slice(4, 10), d.slice(10, 15)].filter(Boolean).join(' ');
+    }
+    return d.replace(/(\d{4})(?=\d)/g, '$1 ').trim();
+  };
+  const detectBrand = (number: string): string => {
+    const d = digitsOnly(number);
+    if (/^4/.test(d)) return 'Visa';
+    if (/^3[47]/.test(d)) return 'Amex';
+    if (/^5[1-5]/.test(d) || /^2(2[2-9]|[3-6]\d|7[01]|720)/.test(d)) return 'Mastercard';
+    if (/^6(011|5)/.test(d)) return 'Discover';
+    return 'Card';
+  };
+  const luhnValid = (number: string): boolean => {
+    const d = digitsOnly(number);
+    if (d.length < 13 || d.length > 19) return false;
+    let sum = 0;
+    let alt = false;
+    for (let i = d.length - 1; i >= 0; i--) {
+      let n = parseInt(d[i], 10);
+      if (alt) {
+        n *= 2;
+        if (n > 9) n -= 9;
+      }
+      sum += n;
+      alt = !alt;
+    }
+    return sum % 10 === 0;
+  };
+
+  const clearCardEntry = () => {
+    setCcName('');
+    setCcNumber('');
+    setCcExpMonth('');
+    setCcExpYear('');
+    setCcCvv('');
+    setCcZip('');
+  };
+
+  const handleInitiateCardPayment = async () => {
+    setCardError('');
+    setCardSuccess('');
+    const amount = parseFloat(cardAmount);
+    if (!amount || amount <= 0) {
+      setCardError('Enter a valid card payment amount.');
+      return;
+    }
+
+    const vaultCard = vaultCards.find(c => c.id === selectedVaultCardId);
+    // Vault only stores brand + last4 (PCI reference). It cannot charge Clover by itself.
+    const usingVault = !!vaultCard && vaultCard.last4.length === 4;
+
+    let brand = vaultCard ? vaultCard.brand : detectBrand(ccNumber);
+    let last4 = vaultCard ? vaultCard.last4 : digitsOnly(ccNumber).slice(-4);
+    let paymentMethodToken: string | undefined;
+
+    if (cardMode === 'processor') {
+      if (!cloverCheckout?.ready || !cloverCheckout.publicKey) {
+        setCardError(
+          'Clover online charging is not ready. Add the PAKMS public key under Reports → Payment processor, or use “Confirm card payment” after running the card on a Clover terminal.'
+        );
+        return;
+      }
+      // Must tokenize via Clover Hosted iframe → clv_ token (vault last4 is only a label)
+      try {
+        const tok = await cloverRef.current!.createToken();
+        paymentMethodToken = tok.token;
+        if (tok.last4) last4 = tok.last4;
+        if (tok.brand) brand = tok.brand;
+      } catch (e) {
+        setCardError(
+          e instanceof Error
+            ? e.message
+            : 'Enter the card in the secure Clover form to charge.'
+        );
+        return;
+      }
+    } else {
+      // Terminal mode: brand+last4 reference only; optional entry for first-payment display
+      const isAmex = brand === 'Amex';
+      const cvvLen = isAmex ? 4 : 3;
+      if (!usingVault && (needsCardEntry || digitsOnly(ccNumber).length > 0)) {
+        if (!(ccName.trim() || tenant.name)) {
+          setCardError('Name on card is required for this payment.');
+          return;
+        }
+        if (digitsOnly(ccNumber).length < 13 || !luhnValid(ccNumber)) {
+          setCardError('Enter a valid card number (for type + last 4 only), or pick a vault card.');
+          return;
+        }
+        const m = parseInt(ccExpMonth, 10);
+        let y = parseInt(ccExpYear, 10);
+        if (!m || m < 1 || m > 12) {
+          setCardError('Enter a valid expiration month (MM).');
+          return;
+        }
+        if (!y) {
+          setCardError('Enter a valid expiration year.');
+          return;
+        }
+        if (y < 100) y += 2000;
+        if (new Date(y, m, 0, 23, 59, 59) < new Date()) {
+          setCardError('This card looks expired. Check the expiration date.');
+          return;
+        }
+        if (digitsOnly(ccCvv).length !== cvvLen) {
+          setCardError(isAmex ? 'Enter the 4-digit CVV.' : 'Enter the 3-digit CVV.');
+          return;
+        }
+        if (digitsOnly(ccZip).length < 5) {
+          setCardError('Enter a billing ZIP code.');
+          return;
+        }
+      }
+      if (needsCardEntry && !usingVault && digitsOnly(ccNumber).length < 13) {
+        setCardError(
+          'Enter a card or select a vault card (type + last 4) so the receipt can show which card was used.'
+        );
+        return;
+      }
+    }
+
+    setCardInitiating(true);
+    try {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/initiate-card`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          date: cardDate,
+          note:
+            cardNote.trim() ||
+            (usingVault
+              ? `Renewal · ${brand} •••• ${last4}`
+              : last4
+                ? `${brand} •••• ${last4}`
+                : undefined),
+          mode: cardMode,
+          cardBrand: last4.length === 4 ? brand : undefined,
+          cardLast4: last4.length === 4 ? last4 : undefined,
+          // Required for processor mode — never full PAN
+          paymentMethodToken,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const procMsg =
+          data.processor && typeof data.processor.message === 'string'
+            ? data.processor.message
+            : '';
+        setCardError(
+          [data.error, data.hint, procMsg && procMsg !== data.error ? procMsg : '']
+            .filter(Boolean)
+            .join(' ') || `Could not charge card (HTTP ${res.status}).`
+        );
+        return;
+      }
+      await loadPayment();
+      clearCardEntry();
+      const baseMsg =
+        data.message ||
+        (data.cardRef
+          ? `Payment saved. Card on file: ${data.cardRef}`
+          : cardMode === 'processor'
+            ? 'Card charged via Clover and recorded.'
+            : 'Card payment recorded for this tenant.');
+      const emailNote = data.email?.customerSent
+        ? ` Receipt emailed to ${tenant.email}.`
+        : data.email?.parkSent
+          ? ' Receipt emailed to the park (no tenant email on file).'
+          : !tenant.email?.trim()
+            ? ' Add tenant email to auto-email their receipt next time.'
+            : data.email?.error
+              ? ` Email: ${data.email.error}`
+              : '';
+      setCardSuccess(`${baseMsg}${emailNote}`);
+      setCardNote('');
+      if (balanceDue - amount > 0.005) {
+        setCardAmount(Math.max(0, balanceDue - amount).toFixed(2));
+      } else {
+        setCardAmount('');
+      }
+      if (onViewReceipt && data.payment?.records?.[0]?.id) {
+        onViewReceipt(data.payment.records[0].id);
+      }
+      setTimeout(() => setCardSuccess(''), 6000);
+    } catch {
+      setCardError('Network error — could not initiate card payment.');
+    } finally {
+      setCardInitiating(false);
+    }
+  };
+
   const handleSaveRates = async () => {
     setSaving(true);
     try {
@@ -218,7 +507,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
       } else {
         body.rentAmount = parseFloat(rentAmount) || 0;
       }
-      const res = await fetch(`/api/tenants/${tenant.id}/payments`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -249,7 +538,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
       if (customPrevious) {
         body.previousReading = parseFloat(previousMeterReading) || 0;
       }
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/meter`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/meter`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -315,7 +604,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
       if (isOldest && editMeterForm.previousReading !== '') {
         body.previousReading = parseFloat(editMeterForm.previousReading) || 0;
       }
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/meter/${editingMeterId}`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/meter/${editingMeterId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -339,7 +628,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     setSaving(true);
     setMeterError('');
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/meter/${recordId}`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/meter/${recordId}`, {
         method: 'DELETE',
       });
       if (!res.ok) {
@@ -369,7 +658,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     setSaving(true);
     setChargeError('');
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/charges`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/charges`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -425,7 +714,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     setSaving(true);
     setChargeError('');
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/charges/${editingChargeId}`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/charges/${editingChargeId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -454,7 +743,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     setSaving(true);
     setChargeError('');
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/charges/${chargeId}`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/charges/${chargeId}`, {
         method: 'DELETE',
       });
       if (!res.ok) {
@@ -484,7 +773,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     setSaving(true);
     setCreditError('');
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/credits`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/credits`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -540,7 +829,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     setSaving(true);
     setCreditError('');
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/credits/${editingCreditId}`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/credits/${editingCreditId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -569,7 +858,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     setSaving(true);
     setCreditError('');
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/credits/${creditId}`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/credits/${creditId}`, {
         method: 'DELETE',
       });
       if (!res.ok) {
@@ -586,90 +875,12 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     }
   };
 
-  const handleSaveCard = async () => {
-    setCardError('');
-    setCardSuccess('');
-    if (!cardForm.cardholderName.trim()) {
-      setCardError('Cardholder name is required.');
-      return;
-    }
-    const last4 = cardForm.last4.replace(/\D/g, '');
-    if (last4.length !== 4) {
-      setCardError('Enter exactly the last 4 digits of the card (full card numbers are not accepted).');
-      return;
-    }
-    if (!cardForm.expMonth || !cardForm.expYear) {
-      setCardError('Expiry month and year are required.');
-      return;
-    }
-    setSaving(true);
-    try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/cards`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cardholderName: cardForm.cardholderName.trim(),
-          last4,
-          brand: cardForm.brand,
-          expMonth: cardForm.expMonth,
-          expYear: cardForm.expYear,
-          billingZip: cardForm.billingZip || undefined,
-          label: cardForm.label || undefined,
-          notes: cardForm.notes || undefined,
-          isDefault: cardForm.isDefault,
-        }),
-      });
-      if (res.ok) {
-        await loadPayment();
-        setCardForm({
-          cardholderName: '',
-          last4: '',
-          brand: 'Card',
-          expMonth: '',
-          expYear: '',
-          billingZip: '',
-          label: '',
-          notes: '',
-          isDefault: false,
-        });
-        setCardSuccess('Card reference saved securely (encrypted last 4 + expiry only).');
-        setTimeout(() => setCardSuccess(''), 3500);
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setCardError(data.error || 'Could not save card.');
-      }
-    } catch {
-      setCardError('Network error — could not save card.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleSetDefaultCard = async (cardId: string) => {
-    setSaving(true);
-    setCardError('');
-    try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/cards/${cardId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isDefault: true }),
-      });
-      if (res.ok) await loadPayment();
-      else {
-        const data = await res.json().catch(() => ({}));
-        setCardError(data.error || 'Could not update card.');
-      }
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleDeleteCard = async (cardId: string) => {
     if (!window.confirm('Remove this card from the tenant’s file?')) return;
     setSaving(true);
     setCardError('');
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/cards/${cardId}`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/cards/${cardId}`, {
         method: 'DELETE',
       });
       if (res.ok) await loadPayment();
@@ -687,7 +898,7 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
     if (!amount || amount <= 0) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/tenants/${tenant.id}/payments/record`, {
+      const res = await apiFetch(`/api/tenants/${tenant.id}/payments/record`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -698,10 +909,25 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
         }),
       });
       if (res.ok) {
-        const updated: TenantPayment = await res.json();
+        const updated = await res.json() as TenantPayment & {
+          emailSent?: boolean;
+          email?: { customerSent?: boolean; parkSent?: boolean; mode?: string; error?: string };
+        };
         await loadPayment();
         setNewAmount('');
         setNewNote('');
+        if (updated.email?.customerSent) {
+          setCardSuccess(`Receipt emailed to ${tenant.email || 'customer'}.`);
+        } else if (updated.email?.parkSent) {
+          setCardSuccess('Payment saved. Receipt emailed to the park (tenant has no email on file).');
+        } else if (!tenant.email?.trim()) {
+          setCardSuccess('Payment saved. Add an email on the tenant to send them a receipt automatically.');
+        } else if (updated.email?.error) {
+          setCardSuccess(`Payment saved. Email issue: ${updated.email.error}`);
+        } else {
+          setCardSuccess('Payment saved. Receipt logged (configure SMTP on the server to send live email).');
+        }
+        setTimeout(() => setCardSuccess(''), 6000);
         // Open receipt for the payment just recorded
         if (onViewReceipt && updated.records?.[0]?.id) {
           onViewReceipt(updated.records[0].id);
@@ -745,6 +971,20 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
           </span>
         </div>
       </div>
+
+      <EarlyDeparturePanel
+        tenantId={tenant.id}
+        tenantName={tenant.name}
+        defaultPreviousReading={effectivePreviousReading}
+        defaultDepartureDate={
+          tenant.endDate && tenant.endDate !== 'ongoing'
+            ? tenant.endDate
+            : new Date().toISOString().split('T')[0]
+        }
+        onApplied={() => {
+          loadPayment();
+        }}
+      />
 
       {rentalType === 'monthly' && (
         <div className="bg-white rounded-[32px] border border-[#E2D9D0] p-6 shadow-sm space-y-4">
@@ -1610,183 +1850,380 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
             )}
           </div>
 
-          <div className="bg-white rounded-[32px] border border-[#E2D9D0] p-6 shadow-sm space-y-5">
-            <div className="border-b border-[#E2D9D0] pb-2">
-              <h3 className="text-sm font-serif text-[#3D3730]">Saved Payment Cards</h3>
-              <p className="text-xs text-[#5A6355] mt-1">
-                Secure card-on-file reference only: last 4 digits, name, brand, and expiry.
-                Full card numbers and CVV are never accepted or stored. Data is encrypted at rest.
-              </p>
+          <div className="bg-white rounded-[32px] border border-[#C29474]/40 p-6 shadow-sm space-y-4">
+            <div className="border-b border-[#E2D9D0] pb-2 flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-serif text-[#3D3730] flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-[#C29474]" />
+                  {isFirstPayment ? 'First payment · credit card' : 'Initiate card payment'}
+                </h3>
+                <p className="text-xs text-[#5A6355] mt-1 max-w-lg">
+                  {cardMode === 'processor'
+                    ? 'Charge online through Clover’s secure form (card data never touches park servers). Vault cards are brand + last 4 only — use them as a label, then enter the card in Clover to charge.'
+                    : isFirstPayment
+                      ? 'After you run the card on a Clover terminal, record the payment here. Only type + last 4 are kept on park records.'
+                      : 'Confirm a card payment after running it on a terminal. Vault entries are brand + last 4 only (not reusable charge tokens).'}
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                {isFirstPayment && (
+                  <span className="text-[10px] uppercase tracking-widest font-semibold px-2.5 py-1 rounded-full border border-[#C29474] bg-[#FBF9F7] text-[#C29474]">
+                    First payment
+                  </span>
+                )}
+                <span className="text-[10px] uppercase tracking-widest font-semibold px-2.5 py-1 rounded-full border border-[#E2D9D0] bg-[#FBF9F7] text-[#5A6355]">
+                  {processorLabel}
+                </span>
+              </div>
             </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Amount ($)</label>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={cardAmount}
+                  onChange={e => setCardAmount(e.target.value)}
+                  placeholder={balanceDue > 0 ? balanceDue.toFixed(2) : '0.00'}
+                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                />
+                {balanceDue > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setCardAmount(balanceDue.toFixed(2))}
+                    className="text-[11px] font-semibold text-[#C29474] hover:underline"
+                  >
+                    Use balance due ({formatCurrency(balanceDue)})
+                  </button>
+                )}
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Date</label>
+                <input
+                  type="date"
+                  value={cardDate}
+                  onChange={e => setCardDate(e.target.value)}
+                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Note (optional)</label>
+              <input
+                value={cardNote}
+                onChange={e => setCardNote(e.target.value)}
+                placeholder="e.g. March rent · first payment"
+                className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+              />
+            </div>
+
+            {/* Saved cards — brand + last 4 only (not Clover charge tokens) */}
+            {vaultCards.length > 0 && (
+              <div className="rounded-2xl border border-[#C29474]/40 bg-[#FBF9F7] p-4 space-y-3">
+                <p className="text-sm font-medium text-[#3D3730]">Cards on file (reference)</p>
+                <p className="text-[11px] text-[#5A6355]">
+                  These are <strong>type + last 4 only</strong> for staff notes. They cannot charge Clover by themselves.
+                  {cardMode === 'processor'
+                    ? ' Pick one to label the receipt, then enter the card in the secure Clover form below.'
+                    : ' Pick one for the receipt after you run the card on your terminal.'}
+                </p>
+                <div className="space-y-2">
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="radio"
+                      name="vault-card"
+                      checked={!selectedVaultCardId}
+                      onChange={() => setSelectedVaultCardId('')}
+                    />
+                    <span className="text-[#5A6355]">Enter a new card below</span>
+                  </label>
+                  {vaultCards.map(c => (
+                    <label
+                      key={c.id}
+                      className={`flex items-center gap-2 text-sm cursor-pointer rounded-xl border px-3 py-2 ${
+                        selectedVaultCardId === c.id
+                          ? 'border-[#C29474] bg-white'
+                          : 'border-[#E2D9D0] bg-white/60'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="vault-card"
+                        checked={selectedVaultCardId === c.id}
+                        onChange={() => setSelectedVaultCardId(c.id)}
+                      />
+                      <span className="font-mono font-medium text-[#3D3730]">
+                        {c.brand} •••• {c.last4}
+                      </span>
+                      {c.guestName && c.guestName !== tenant.name && (
+                        <span className="text-[11px] text-[#5A6355]">({c.guestName})</span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+                {selectedVaultCardId && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setCardError('');
+                      setCardSuccess('');
+                      const res = await apiFetch(
+                        `/api/card-refs/${encodeURIComponent(selectedVaultCardId)}/apply`,
+                        {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ tenantId: tenant.id }),
+                        }
+                      );
+                      const data = await res.json().catch(() => ({}));
+                      if (!res.ok) {
+                        setCardError(data.error || 'Could not apply card.');
+                        return;
+                      }
+                      setCardSuccess(data.message || 'Card applied for renewals on this tenant.');
+                      await loadPayment();
+                    }}
+                    className="text-xs font-semibold text-[#5A6355] border border-[#E2D9D0] bg-white px-3 py-2 rounded-xl hover:bg-[#F0EBE6]"
+                  >
+                    Attach selected card to this tenant
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Processor mode: Clover Hosted iframe (required for live charge) */}
+            {cardMode === 'processor' ? (
+              <div className="rounded-2xl border border-[#E2D9D0] bg-[#FBF9F7] p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Lock className="w-4 h-4 text-[#5A6355]" />
+                  <p className="text-sm font-medium text-[#3D3730]">
+                    Secure card entry (Clover) *
+                  </p>
+                </div>
+                {selectedVaultCardId && (
+                  <p className="text-xs text-[#6B4A32] bg-white border border-[#C29474]/30 rounded-xl px-3 py-2">
+                    Vault shows which card you expect (••••{vaultCards.find(c => c.id === selectedVaultCardId)?.last4}).
+                    Still enter that card in Clover below — the vault cannot charge by last 4 alone.
+                  </p>
+                )}
+                {cloverCheckout?.ready && cloverCheckout.publicKey ? (
+                  <CloverCardIframe
+                    ref={cloverRef}
+                    publicKey={cloverCheckout.publicKey}
+                    merchantId={cloverCheckout.merchantId}
+                    testMode={!!cloverCheckout.testMode}
+                    footnote="Card numbers go only to Clover. Park records keep amount, Card, and optional type + last 4."
+                  />
+                ) : (
+                  <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-2xl px-4 py-3">
+                    {cloverCheckout?.message ||
+                      'Clover public/PAKMS key missing. Open Reports → Payment processor, run Test connection, then try again. Or use “Confirm card payment” after a terminal charge.'}
+                  </p>
+                )}
+              </div>
+            ) : (
+              /* Terminal mode: optional type+last4 entry for records */
+              <div className="rounded-2xl border border-[#E2D9D0] bg-[#FBF9F7] p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <CreditCard className="w-4 h-4 text-[#5A6355]" />
+                  <p className="text-sm font-medium text-[#3D3730]">
+                    Credit / debit card
+                    {needsCardEntry && !selectedVaultCardId ? ' *' : selectedVaultCardId ? ' (using vault card)' : ' (optional)'}
+                  </p>
+                </div>
+                {selectedVaultCardId ? (
+                  <p className="text-xs text-[#5A6355]">
+                    Using vault card for the receipt label. Run the physical card on your Clover terminal,
+                    then confirm below. Park records show type + last 4 only.
+                  </p>
+                ) : null}
+                <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${selectedVaultCardId ? 'opacity-50 pointer-events-none' : ''}`}>
+                  <div className="space-y-1 sm:col-span-2">
+                    <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Name on card *</label>
+                    <input
+                      value={ccName}
+                      onChange={e => setCcName(e.target.value)}
+                      placeholder={tenant.name || 'Name as shown on card'}
+                      autoComplete="cc-name"
+                      className="w-full px-4 py-3 bg-white border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                    />
+                  </div>
+                  <div className="space-y-1 sm:col-span-2">
+                    <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Card number *</label>
+                    <div className="relative">
+                      <input
+                        value={ccNumber}
+                        onChange={e => setCcNumber(formatCardNumber(e.target.value))}
+                        placeholder="ACCT-000035"
+                        inputMode="numeric"
+                        autoComplete="cc-number"
+                        className="w-full px-4 py-3 bg-white border border-[#E2D9D0] rounded-2xl text-sm font-mono tracking-wider focus:outline-none focus:ring-1 focus:ring-[#5A6355] pr-16"
+                      />
+                      {digitsOnly(ccNumber).length >= 4 && (
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-semibold text-[#C29474] uppercase">
+                          {detectBrand(ccNumber)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Exp. month *</label>
+                    <input
+                      value={ccExpMonth}
+                      onChange={e => setCcExpMonth(digitsOnly(e.target.value).slice(0, 2))}
+                      placeholder="MM"
+                      inputMode="numeric"
+                      maxLength={2}
+                      autoComplete="cc-exp-month"
+                      className="w-full px-4 py-3 bg-white border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Exp. year *</label>
+                    <input
+                      value={ccExpYear}
+                      onChange={e => setCcExpYear(digitsOnly(e.target.value).slice(0, 4))}
+                      placeholder="YY"
+                      inputMode="numeric"
+                      maxLength={4}
+                      autoComplete="cc-exp-year"
+                      className="w-full px-4 py-3 bg-white border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">CVV *</label>
+                    <input
+                      value={ccCvv}
+                      onChange={e =>
+                        setCcCvv(
+                          digitsOnly(e.target.value).slice(0, detectBrand(ccNumber) === 'Amex' ? 4 : 3)
+                        )
+                      }
+                      placeholder={detectBrand(ccNumber) === 'Amex' ? '1234' : '123'}
+                      inputMode="numeric"
+                      autoComplete="cc-csc"
+                      className="w-full px-4 py-3 bg-white border border-[#E2D9D0] rounded-2xl text-sm font-mono tracking-widest focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Billing ZIP *</label>
+                    <input
+                      value={ccZip}
+                      onChange={e => setCcZip(e.target.value.slice(0, 12))}
+                      placeholder="12345"
+                      autoComplete="billing postal-code"
+                      className="w-full px-4 py-3 bg-white border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                    />
+                  </div>
+                </div>
+                <p className="text-[11px] text-[#5A6355]">
+                  After save you will see only type + last 4. Full number and CVV are not kept on this server.
+                </p>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setCardMode('terminal')}
+                className={`text-left px-4 py-3 rounded-2xl border-2 text-sm transition ${
+                  cardMode === 'terminal'
+                    ? 'border-[#C29474] bg-[#FBF9F7] text-[#3D3730]'
+                    : 'border-[#E2D9D0] text-[#5A6355] hover:border-[#C29474]/50'
+                }`}
+              >
+                <span className="font-semibold block">Confirm card payment</span>
+                <span className="text-[11px] opacity-80">
+                  Card run on terminal / processor — record payment here
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setCardMode('processor')}
+                className={`text-left px-4 py-3 rounded-2xl border-2 text-sm transition ${
+                  cardMode === 'processor'
+                    ? 'border-[#C29474] bg-[#FBF9F7] text-[#3D3730]'
+                    : 'border-[#E2D9D0] text-[#5A6355] hover:border-[#C29474]/50'
+                }`}
+              >
+                <span className="font-semibold block">Charge via processor</span>
+                <span className="text-[11px] opacity-80">
+                  {processorReady
+                    ? 'Send charge through connected processor'
+                    : 'Requires Settings → Payment processor'}
+                </span>
+              </button>
+            </div>
+
+            {cardError && (
+              <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-2xl px-4 py-3">
+                {cardError}
+              </p>
+            )}
+            {cardSuccess && (
+              <p className="text-sm text-[#3D5A3D] bg-[#E8F0E8] border border-[#A8B2A6] rounded-2xl px-4 py-3 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                {cardSuccess}
+              </p>
+            )}
+
+            <button
+              type="button"
+              onClick={handleInitiateCardPayment}
+              disabled={cardInitiating || !cardAmount}
+              className="w-full flex items-center justify-center gap-2 bg-[#5A6355] text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50"
+            >
+              {cardInitiating ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Processing…
+                </>
+              ) : (
+                <>
+                  <CreditCard className="w-4 h-4" />
+                  {isFirstPayment
+                    ? `Save first payment${cardAmount ? ` · ${formatCurrency(parseFloat(cardAmount) || 0)}` : ''}`
+                    : cardMode === 'processor'
+                      ? `Charge ${cardAmount ? formatCurrency(parseFloat(cardAmount) || 0) : ''} by card`
+                      : `Record card payment${cardAmount ? ` · ${formatCurrency(parseFloat(cardAmount) || 0)}` : ''}`}
+                </>
+              )}
+            </button>
+
             {payment?.savedCards && payment.savedCards.length > 0 && (
-              <div className="space-y-2">
+              <div className="space-y-2 pt-2 border-t border-[#E2D9D0]">
+                <p className="text-[11px] text-[#5A6355]">Card on file (type + last 4 only)</p>
                 {payment.savedCards.map((card: SavedPaymentCard) => (
                   <div
                     key={card.id}
-                    className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#E2D9D0] bg-[#FBF9F7] px-4 py-3"
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#E2D9D0] bg-white px-4 py-3"
                   >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-10 h-10 rounded-xl bg-[#EDE7E1] flex items-center justify-center shrink-0">
-                        <CreditCard className="w-4 h-4 text-[#5A6355]" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-[#3D3730] truncate">
-                          {card.brand} •••• {card.last4}
-                          {card.isDefault && (
-                            <span className="ml-2 text-[10px] uppercase tracking-wider text-[#3D5A3D] bg-[#E8F0E8] px-2 py-0.5 rounded-full">
-                              Default
-                            </span>
-                          )}
-                        </p>
-                        <p className="text-xs text-[#5A6355] truncate">
-                          {card.cardholderName}
-                          {' · '}
-                          Exp {card.expMonth}/{card.expYear.slice(-2)}
-                          {card.label ? ` · ${card.label}` : ''}
-                          {card.billingZip ? ` · ZIP ${card.billingZip}` : ''}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {!card.isDefault && (
-                        <button
-                          type="button"
-                          onClick={() => handleSetDefaultCard(card.id)}
-                          disabled={saving}
-                          className="text-xs font-semibold text-[#5A6355] hover:text-[#3D3730] px-3 py-2 rounded-xl border border-[#E2D9D0] bg-white"
-                        >
-                          Make default
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteCard(card.id)}
-                        disabled={saving}
-                        className="text-xs font-semibold text-red-700 hover:bg-red-50 px-3 py-2 rounded-xl border border-red-200"
-                      >
-                        Remove
-                      </button>
-                    </div>
+                    <p className="text-sm font-medium text-[#3D3730] font-mono tracking-wide">
+                      {card.brand} •••• {card.last4}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteCard(card.id)}
+                      disabled={saving}
+                      className="text-xs font-semibold text-red-700 hover:bg-red-50 px-3 py-2 rounded-xl border border-red-200"
+                    >
+                      Remove
+                    </button>
                   </div>
                 ))}
               </div>
             )}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-2 sm:col-span-2">
-                <label className="text-xs uppercase tracking-widest text-[#5A6355]">Cardholder name *</label>
-                <input
-                  autoComplete="off"
-                  value={cardForm.cardholderName}
-                  onChange={e => setCardForm(p => ({ ...p, cardholderName: e.target.value }))}
-                  placeholder="Name on card"
-                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase tracking-widest text-[#5A6355]">Last 4 digits *</label>
-                <input
-                  inputMode="numeric"
-                  autoComplete="off"
-                  maxLength={4}
-                  value={cardForm.last4}
-                  onChange={e => setCardForm(p => ({ ...p, last4: e.target.value.replace(/\D/g, '').slice(0, 4) }))}
-                  placeholder="1234"
-                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355] font-mono tracking-widest"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase tracking-widest text-[#5A6355]">Brand *</label>
-                <select
-                  value={cardForm.brand}
-                  onChange={e => setCardForm(p => ({ ...p, brand: e.target.value }))}
-                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
-                >
-                  {['Card', 'Visa', 'Mastercard', 'Amex', 'Discover', 'Other'].map(b => (
-                    <option key={b} value={b}>{b}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase tracking-widest text-[#5A6355]">Exp month *</label>
-                <input
-                  inputMode="numeric"
-                  autoComplete="off"
-                  maxLength={2}
-                  value={cardForm.expMonth}
-                  onChange={e => setCardForm(p => ({ ...p, expMonth: e.target.value.replace(/\D/g, '').slice(0, 2) }))}
-                  placeholder="MM"
-                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase tracking-widest text-[#5A6355]">Exp year *</label>
-                <input
-                  inputMode="numeric"
-                  autoComplete="off"
-                  maxLength={4}
-                  value={cardForm.expYear}
-                  onChange={e => setCardForm(p => ({ ...p, expYear: e.target.value.replace(/\D/g, '').slice(0, 4) }))}
-                  placeholder="YYYY"
-                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase tracking-widest text-[#5A6355]">Billing ZIP</label>
-                <input
-                  value={cardForm.billingZip}
-                  onChange={e => setCardForm(p => ({ ...p, billingZip: e.target.value }))}
-                  placeholder="Optional"
-                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase tracking-widest text-[#5A6355]">Label</label>
-                <input
-                  value={cardForm.label}
-                  onChange={e => setCardForm(p => ({ ...p, label: e.target.value }))}
-                  placeholder="e.g. Primary, Work"
-                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
-                />
-              </div>
-            </div>
-            <label className="flex items-center gap-2 text-xs text-[#5A6355] cursor-pointer">
-              <input
-                type="checkbox"
-                checked={cardForm.isDefault}
-                onChange={e => setCardForm(p => ({ ...p, isDefault: e.target.checked }))}
-                className="rounded border-[#E2D9D0]"
-              />
-              Set as default card for this tenant
-            </label>
-            {cardError && (
-              <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-2xl px-4 py-3">{cardError}</p>
-            )}
-            {cardSuccess && (
-              <p className="text-sm text-[#3D5A3D] bg-[#E8F0E8] border border-[#A8B2A6] rounded-2xl px-4 py-3">{cardSuccess}</p>
-            )}
-            <button
-              type="button"
-              onClick={handleSaveCard}
-              disabled={saving}
-              className="flex items-center justify-center gap-2 bg-[#5A6355] text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#3D3730] transition disabled:opacity-50 w-full"
-            >
-              <CreditCard className="w-4 h-4" />
-              {saving ? 'Saving…' : 'Save Card on File'}
-            </button>
           </div>
 
           <div className="bg-white rounded-[32px] border border-[#E2D9D0] p-6 shadow-sm space-y-5">
             <h3 className="text-sm font-serif text-[#3D3730] border-b border-[#E2D9D0] pb-2">Record Payment</h3>
-            {payment?.savedCards && payment.savedCards.length > 0 && (
-              <p className="text-xs text-[#5A6355] bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl px-4 py-3">
-                Card on file:{' '}
-                <strong className="text-[#3D3730]">
-                  {(payment.savedCards.find(c => c.isDefault) || payment.savedCards[0]).brand}
-                  {' '}•••• {(payment.savedCards.find(c => c.isDefault) || payment.savedCards[0]).last4}
-                </strong>
-                {' '}— choose Card below when recording a payment with this method.
-              </p>
-            )}
+            <p className="text-xs text-[#5A6355] bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl px-4 py-3">
+              Choose method <strong className="text-[#3D3730]">Card</strong> when the guest paid by card.
+              Do not enter card numbers here — those stay with the payment processor.
+            </p>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <label className="text-xs uppercase tracking-widest text-[#5A6355]">Amount ($)</label>
@@ -1819,12 +2256,6 @@ export function TenantPaymentPage({ tenant, onBack, onViewReceipt }: TenantPayme
               >
                 {PAYMENT_METHODS.map(m => (
                   <option key={m} value={m}>{m}</option>
-                ))}
-                {payment?.savedCards?.map(card => (
-                  <option key={card.id} value={`Card •••• ${card.last4}`}>
-                    {card.brand} •••• {card.last4}
-                    {card.isDefault ? ' (default)' : ''}
-                  </option>
                 ))}
               </select>
             </div>

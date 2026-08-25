@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { Tenant } from '../types';
+import { atomicWriteJson } from './persist';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const TENANTS_FILE = path.join(DATA_DIR, 'tenants.json');
@@ -30,7 +31,7 @@ function ensureDataDir() {
 export function getTenants(): Tenant[] {
   ensureDataDir();
   if (!fs.existsSync(TENANTS_FILE)) {
-    fs.writeFileSync(TENANTS_FILE, JSON.stringify(DEFAULT_TENANTS, null, 2));
+    atomicWriteJson(TENANTS_FILE, DEFAULT_TENANTS);
     return DEFAULT_TENANTS;
   }
   return JSON.parse(fs.readFileSync(TENANTS_FILE, 'utf-8'));
@@ -38,7 +39,7 @@ export function getTenants(): Tenant[] {
 
 export function saveTenants(tenants: Tenant[]) {
   ensureDataDir();
-  fs.writeFileSync(TENANTS_FILE, JSON.stringify(tenants, null, 2));
+  atomicWriteJson(TENANTS_FILE, tenants);
 }
 
 export function getTenant(id: string): Tenant | null {

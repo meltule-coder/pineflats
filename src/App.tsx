@@ -17,156 +17,369 @@ import { TenantDetailPage } from './components/TenantDetailPage';
 import { TenantPaymentPage } from './components/TenantPaymentPage';
 import { TenantReceiptPage } from './components/TenantReceiptPage';
 import { AddTenantWidget } from './components/AddTenantWidget';
-import { Users, Image as ImageIcon, Search, Sparkles, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign, Settings, Building2 } from 'lucide-react';
+import { AdminLogin } from './components/AdminLogin';
+import { TaxQuarterlyWidget } from './components/TaxQuarterlyWidget';
+import { RevenueMonthlyWidget } from './components/RevenueMonthlyWidget';
+import { GuestReceiptsWidget } from './components/GuestReceiptsWidget';
+import { PhoneReservationWidget } from './components/PhoneReservationWidget';
+import { PaymentProcessorWidget } from './components/PaymentProcessorWidget';
+import { CardVaultWidget } from './components/CardVaultWidget';
+import { ReceiptGeneratorWidget } from './components/ReceiptGeneratorWidget';
+import { SmsSettingsWidget } from './components/SmsSettingsWidget';
+import { GoogleConnectWidget } from './components/GoogleConnectWidget';
+import { PreviousTenantsWidget } from './components/PreviousTenantsWidget';
+import { Users, Image as ImageIcon, Search, Calendar as CalendarIcon, Grid3x3, ChevronRight, DollarSign, Settings, Building2, LogOut, KeyRound, X, Eye, EyeOff } from 'lucide-react';
 import { Tenant, Photo } from '../types';
 
-type AppTab = 'tenants' | 'sites' | 'photos' | 'marketing' | 'calendar' | 'properties' | 'settings';
+type AppTab = 'tenants' | 'sites' | 'photos' | 'calendar' | 'properties' | 'reports' | 'settings';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<AppTab>('tenants');
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [activeTab, setActiveTab] = useState<AppTab>('calendar');
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [tenantView, setTenantView] = useState<'info' | 'payment' | 'receipt'>('info');
   const [highlightPaymentId, setHighlightPaymentId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  const [pwRecoveryEmail, setPwRecoveryEmail] = useState('');
+  const [pwShow, setPwShow] = useState(false);
+  const [pwError, setPwError] = useState<string | null>(null);
+  const [pwSuccess, setPwSuccess] = useState<string | null>(null);
+  const [pwSaving, setPwSaving] = useState(false);
 
   const loadData = async () => {
     try {
       const [tRes, pRes] = await Promise.all([
-        fetch('/api/tenants'),
-        fetch('/api/photos'),
+        fetch('/api/tenants', { credentials: 'include' }),
+        fetch('/api/photos', { credentials: 'include' }),
       ]);
-      setTenants(await tRes.json());
-      setPhotos(await pRes.json());
+      if (tRes.status === 401 || pRes.status === 401) {
+        setAuthenticated(false);
+        return;
+      }
+      if (tRes.ok) setTenants(await tRes.json());
+      if (pRes.ok) setPhotos(await pRes.json());
     } catch (e) {
       console.error(e);
     }
   };
 
+  const checkAuth = async () => {
+    try {
+      const res = await fetch('/api/admin/status', { credentials: 'include' });
+      if (!res.ok) {
+        setAuthenticated(false);
+        return;
+      }
+      const data = await res.json();
+      setAuthenticated(!!data.authenticated);
+    } catch {
+      setAuthenticated(false);
+    } finally {
+      setAuthChecked(true);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/admin/logout', { method: 'POST', credentials: 'include' });
+    } catch {
+      // ignore
+    }
+    setAuthenticated(false);
+    setTenants([]);
+    setPhotos([]);
+    setSelectedTenantId(null);
+  };
+
+  const openChangePassword = () => {
+    setPwCurrent('');
+    setPwNew('');
+    setPwConfirm('');
+    setPwShow(false);
+    setPwError(null);
+    setPwSuccess(null);
+    setShowChangePassword(true);
+    void fetch('/api/admin/recovery-email', { credentials: 'include' })
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (data?.recoveryEmail) setPwRecoveryEmail(data.recoveryEmail);
+      })
+      .catch(() => {});
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPwError(null);
+    setPwSuccess(null);
+    if (pwNew.trim().length < 12) {
+      setPwError('New password must be at least 12 characters.');
+      return;
+    }
+    if (pwNew !== pwConfirm) {
+      setPwError('New passwords do not match.');
+      return;
+    }
+    setPwSaving(true);
+    try {
+      const res = await fetch('/api/admin/password', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          currentPassword: pwCurrent,
+          newPassword: pwNew,
+          recoveryEmail: pwRecoveryEmail.trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setPwError(data.error || 'Could not change password');
+        return;
+      }
+      setPwSuccess(
+        data.recoveryEmailMasked
+          ? `Password updated. Backup recovery email: ${data.recoveryEmailMasked}`
+          : 'Password updated.'
+      );
+      setPwCurrent('');
+      setPwNew('');
+      setPwConfirm('');
+      setTimeout(() => {
+        setShowChangePassword(false);
+        setPwSuccess(null);
+      }, 2000);
+    } catch {
+      setPwError('Network error — try again.');
+    } finally {
+      setPwSaving(false);
+    }
+  };
+
   useEffect(() => {
-    loadData();
+    checkAuth();
     const tab = new URLSearchParams(window.location.search).get('tab');
-    if (tab === 'sites' || tab === 'tenants' || tab === 'photos' || tab === 'marketing' || tab === 'calendar' || tab === 'properties' || tab === 'settings') {
+    if (
+      tab === 'sites'
+      || tab === 'tenants'
+      || tab === 'photos'
+      || tab === 'calendar'
+      || tab === 'properties'
+      || tab === 'reports'
+      || tab === 'settings'
+    ) {
       setActiveTab(tab);
     }
   }, []);
 
+  useEffect(() => {
+    if (authenticated) loadData();
+  }, [authenticated]);
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-[#F7F3F0] flex items-center justify-center text-[#5A6355] text-sm">
+        Checking sign-in…
+      </div>
+    );
+  }
+
+  if (!authenticated) {
+    return (
+      <AdminLogin
+        onSuccess={() => {
+          setAuthenticated(true);
+        }}
+      />
+    );
+  }
+
+  const navTabs: { id: AppTab; label: string; icon: typeof CalendarIcon }[] = [
+    { id: 'calendar', label: 'Bookings', icon: CalendarIcon },
+    { id: 'sites', label: 'Sites', icon: Grid3x3 },
+    { id: 'tenants', label: 'Tenants', icon: Users },
+    { id: 'photos', label: 'Media', icon: ImageIcon },
+    { id: 'properties', label: 'Properties', icon: Building2 },
+    { id: 'reports', label: 'Reports', icon: DollarSign },
+    { id: 'settings', label: 'Settings', icon: Settings },
+  ];
+
   return (
     <div className="min-h-screen bg-[#F7F3F0] font-sans selection:bg-[#E2D9D0] text-[#3D3730] flex flex-col">
-      {/* Header */}
-      <header className="bg-[#F7F3F0] pt-8 pb-4">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between mb-8">
-          <div className="flex items-center gap-3">
-            <img
-              src="/logo.svg"
-              alt="Pine Flats logo"
-              className="h-14 w-14 sm:h-16 sm:w-16 object-contain rounded-xl border border-[#E2D9D0] bg-white shadow-sm p-1"
-            />
-            <div>
-              <h1 className="text-2xl font-serif italic text-[#5A6355] font-bold">Pine Flats</h1>
-              <p className="text-[10px] uppercase tracking-widest opacity-60">Property Management</p>
+      {/* Top nav: logo + main tabs + account actions */}
+      <header className="sticky top-0 z-40 bg-[#F7F3F0]/95 backdrop-blur-sm border-b border-[#E2D9D0] shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <img
+                src="/logo.png?v=4"
+                alt="Pine Flats RV Park"
+                className="h-12 sm:h-16 w-auto max-w-[120px] sm:max-w-[160px] object-contain object-left rounded-xl shadow-sm shrink-0"
+              />
+              <h1 className="text-lg sm:text-2xl font-serif italic text-[#5A6355] font-bold truncate">
+                Admin Page
+              </h1>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={openChangePassword}
+                className="flex items-center gap-2 text-sm font-semibold text-[#5A6355] border border-[#E2D9D0] bg-white px-3 py-2 rounded-xl hover:bg-[#FBF9F7] transition"
+              >
+                <KeyRound className="w-4 h-4" />
+                <span className="hidden sm:inline">Change password</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="flex items-center gap-2 text-sm font-semibold text-[#5A6355] border border-[#E2D9D0] bg-white px-3 py-2 rounded-xl hover:bg-[#FBF9F7] transition"
+              >
+                <LogOut className="w-4 h-4" />
+                <span className="hidden sm:inline">Sign out</span>
+              </button>
             </div>
           </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-3 bg-white/50 px-4 py-2 rounded-2xl border border-white">
-              <div className="flex -space-x-2">
-                <div className="w-8 h-8 rounded-full bg-[#A8B2A6] border-2 border-[#EDE7E1] flex items-center justify-center text-[10px] text-white font-bold">D</div>
-                <div className="w-8 h-8 rounded-full bg-[#C29474] border-2 border-[#EDE7E1] flex items-center justify-center text-[10px] text-white font-bold">M</div>
-              </div>
-              <div className="hidden sm:block text-[11px] leading-tight">
-                 <p className="uppercase tracking-wider opacity-60">Active Access</p>
-                 <p>Dave & Melinda synced</p>
-              </div>
-            </div>
-          </div>
+
+          <nav
+            aria-label="Admin main navigation"
+            className="flex flex-wrap gap-1.5 sm:gap-2 bg-[#EDE7E1] p-1.5 sm:p-2 rounded-2xl sm:rounded-3xl border border-[#E2D9D0]"
+          >
+            {navTabs.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => {
+                  setActiveTab(id);
+                  if (id !== 'tenants') {
+                    setSelectedTenantId(null);
+                    setTenantView('info');
+                  }
+                }}
+                className={`flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 text-sm font-medium transition-colors ${
+                  activeTab === id
+                    ? 'bg-[#5A6355] text-white rounded-xl sm:rounded-2xl'
+                    : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-xl sm:rounded-2xl'
+                }`}
+              >
+                <Icon className="w-4 h-4 shrink-0" />
+                {label}
+              </button>
+            ))}
+          </nav>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex-1 flex flex-col">
-        
-        {/* Navigation Tabs */}
-        <div className="flex space-x-2 mb-8 bg-[#EDE7E1] p-2 rounded-3xl w-fit drop-shadow-sm border border-[#E2D9D0]">
-          <button
-            onClick={() => setActiveTab('tenants')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-              activeTab === 'tenants' 
-                ? 'bg-[#5A6355] text-white rounded-2xl' 
-                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            Tenants
-          </button>
-          <button
-            onClick={() => setActiveTab('sites')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-              activeTab === 'sites' 
-                ? 'bg-[#5A6355] text-white rounded-2xl' 
-                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
-            }`}
-          >
-            <Grid3x3 className="w-4 h-4" />
-            Sites
-          </button>
-          <button
-            onClick={() => setActiveTab('photos')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-              activeTab === 'photos' 
-                ? 'bg-[#5A6355] text-white rounded-2xl' 
-                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
-            }`}
-          >
-            <ImageIcon className="w-4 h-4" />
-            Media
-          </button>
-          <button
-            onClick={() => setActiveTab('marketing')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-              activeTab === 'marketing' 
-                ? 'bg-[#5A6355] text-white rounded-2xl' 
-                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
-            }`}
-          >
-            <Sparkles className="w-4 h-4" />
-            Marketing Widget
-          </button>
-          <button
-            onClick={() => setActiveTab('calendar')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-              activeTab === 'calendar' 
-                ? 'bg-[#5A6355] text-white rounded-2xl' 
-                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
-            }`}
-          >
-            <CalendarIcon className="w-4 h-4" />
-            Bookings
-          </button>
-          <button
-            onClick={() => setActiveTab('properties')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-              activeTab === 'properties'
-                ? 'bg-[#5A6355] text-white rounded-2xl'
-                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
-            }`}
-          >
-            <Building2 className="w-4 h-4" />
-            Properties
-          </button>
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-              activeTab === 'settings'
-                ? 'bg-[#5A6355] text-white rounded-2xl'
-                : 'text-[#5A6355] hover:bg-[#E2D9D0] rounded-2xl'
-            }`}
-          >
-            <Settings className="w-4 h-4" />
-            Settings
-          </button>
+      {showChangePassword && (
+        <div className="fixed inset-0 z-[80] bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-[28px] border border-[#E2D9D0] shadow-xl p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-lg font-serif text-[#3D3730]">Change admin password</h2>
+              <button
+                type="button"
+                onClick={() => setShowChangePassword(false)}
+                className="p-2 rounded-xl hover:bg-[#FBF9F7] text-[#5A6355]"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleChangePassword} className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Current password</label>
+                <div className="relative">
+                  <input
+                    type={pwShow ? 'text' : 'password'}
+                    value={pwCurrent}
+                    onChange={e => setPwCurrent(e.target.value)}
+                    autoComplete="current-password"
+                    className="w-full px-4 py-3 pr-12 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPwShow(v => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-[#5A6355]"
+                    aria-label={pwShow ? 'Hide password' : 'Show password'}
+                  >
+                    {pwShow ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">New password</label>
+                <input
+                  type={pwShow ? 'text' : 'password'}
+                  value={pwNew}
+                  onChange={e => setPwNew(e.target.value)}
+                  autoComplete="new-password"
+                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                  required
+                  minLength={12}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">Confirm new password</label>
+                <input
+                  type={pwShow ? 'text' : 'password'}
+                  value={pwConfirm}
+                  onChange={e => setPwConfirm(e.target.value)}
+                  autoComplete="new-password"
+                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                  required
+                  minLength={12}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] uppercase tracking-widest text-[#5A6355]">
+                  Backup recovery email
+                </label>
+                <input
+                  type="email"
+                  value={pwRecoveryEmail}
+                  onChange={e => setPwRecoveryEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  className="w-full px-4 py-3 bg-[#FBF9F7] border border-[#E2D9D0] rounded-2xl text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355]"
+                />
+                <p className="text-[11px] text-[#5A6355]">
+                  Used if you get locked out — receive a one-time code to reset the password.
+                </p>
+              </div>
+              {pwError && (
+                <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{pwError}</p>
+              )}
+              {pwSuccess && (
+                <p className="text-sm text-[#3D5A3D] bg-[#E8F0E8] border border-[#A8B2A6] rounded-xl px-3 py-2">{pwSuccess}</p>
+              )}
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={pwSaving}
+                  className="flex items-center gap-2 bg-[#5A6355] text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#3D3730] disabled:opacity-50"
+                >
+                  <KeyRound className="w-4 h-4" />
+                  {pwSaving ? 'Saving…' : 'Save password'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowChangePassword(false)}
+                  className="px-5 py-2.5 rounded-xl text-sm font-semibold border border-[#E2D9D0] text-[#5A6355] hover:bg-[#FBF9F7]"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
+      )}
 
+      {/* Main Content */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 flex flex-col">
         {/* Tab Content */}
         {activeTab === 'tenants' && selectedTenantId && tenantView === 'payment' && (() => {
           const tenant = tenants.find(t => t.id === selectedTenantId);
@@ -297,17 +510,32 @@ export default function App() {
                        {t.endDate}
                      </div>
                   )}
-                  <div className="flex items-center gap-4 mt-2">
+                  <div className="flex flex-col items-center gap-2 mt-2 w-full">
                     <span className="flex items-center gap-1 text-xs text-[#C29474] font-medium group-hover:gap-2 transition-all">
                       View Info <ChevronRight className="w-3.5 h-3.5" />
                     </span>
                     <span
                       role="button"
-                      onClick={(e) => { e.stopPropagation(); setSelectedTenantId(t.id); setTenantView('payment'); }}
-                      className="flex items-center gap-1 text-xs text-[#5A6355] font-medium hover:text-[#3D3730] transition"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedTenantId(t.id);
+                        setTenantView('payment');
+                      }}
+                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-[#5A6355] hover:bg-[#3D3730] px-3 py-2 rounded-xl transition"
                     >
                       <DollarSign className="w-3.5 h-3.5" />
-                      Payments
+                      View receipt / payment history
+                    </span>
+                    <span
+                      role="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedTenantId(t.id);
+                        setTenantView('receipt');
+                      }}
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-[#5A6355] hover:text-[#3D3730] transition"
+                    >
+                      Open printable receipts
                     </span>
                   </div>
                 </button>
@@ -318,6 +546,8 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            <PreviousTenantsWidget />
           </div>
         )}
 
@@ -326,43 +556,27 @@ export default function App() {
         )}
 
         {activeTab === 'photos' && (
-          <PhotosWidget onUpdate={loadData} />
-        )}
-
-        {activeTab === 'marketing' && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <div className="flex justify-between items-center">
-              <h2 className="text-xl font-serif text-[#3D3730]">Quick Marketing Widget</h2>
-            </div>
-            
-            <div className="bg-white rounded-[32px] shadow-sm border border-[#E2D9D0] p-6 md:p-8">
-              <div className="max-w-2xl mx-auto text-center space-y-4">
-                <div className="w-16 h-16 bg-[#EDE7E1] text-[#5A6355] rounded-[24px] flex items-center justify-center mx-auto mb-4 border border-[#E2D9D0]">
-                  <Sparkles className="w-8 h-8" />
-                </div>
-                <h3 className="text-xl font-serif text-[#3D3730]">Broadcast Updates</h3>
-                <p className="text-[#5A6355] text-sm leading-relaxed">
-                  Quickly push promotions, news, or announcements to the Pine Flats website and social channels. The AI Assistant can help draft your copy and automatically post to connected services.
-                </p>
-                <div className="pt-6">
-                  <textarea 
-                    rows={4}
-                    placeholder="E.g., We have 3 new spots open for the weekend!..."
-                    className="w-full p-4 bg-[#FBF9F7] border border-[#E2D9D0] rounded-[24px] text-sm focus:outline-none focus:ring-1 focus:ring-[#5A6355] italic mb-4 text-[#3D3730]"
-                  ></textarea>
-                  <button className="bg-[#C29474] text-white px-6 py-3 rounded-xl text-sm font-semibold shadow-lg shadow-black/10 transition-transform active:scale-95 w-full sm:w-auto">
-                    Draft & Publish with Assistant
-                  </button>
-                </div>
-              </div>
-            </div>
+          <div className="space-y-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <GoogleConnectWidget emailFocus />
+            <PhotosWidget onUpdate={loadData} />
           </div>
         )}
 
         {activeTab === 'calendar' && (
           <div className="space-y-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <PhoneReservationWidget />
             <CalendarWidget />
-            <CustomersWidget />
+            <CardVaultWidget />
+            <CustomersWidget
+              onConverted={async (created) => {
+                await loadData();
+                setActiveTab('tenants');
+                if (created?.id) {
+                  setSelectedTenantId(created.id);
+                  setTenantView('info');
+                }
+              }}
+            />
           </div>
         )}
 
@@ -370,11 +584,29 @@ export default function App() {
           <PropertiesWidget />
         )}
 
+        {activeTab === 'reports' && (
+          <div className="space-y-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <div>
+              <h2 className="text-xl font-serif text-[#3D3730] mb-1">Reports</h2>
+              <p className="text-sm text-[#5A6355]">
+                Tax, revenue, overnight &amp; weekly receipts, and payment processor for park records.
+              </p>
+            </div>
+            <TaxQuarterlyWidget />
+            <RevenueMonthlyWidget />
+            <GuestReceiptsWidget />
+            <PaymentProcessorWidget />
+          </div>
+        )}
+
         {activeTab === 'settings' && (
           <div className="space-y-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
             <WebsitePreviewWidget />
-            <CommentsAdminWidget />
             <ContactWidget onUpdate={loadData} />
+            <GoogleConnectWidget />
+            <SmsSettingsWidget />
+            <ReceiptGeneratorWidget />
+            <CommentsAdminWidget />
           </div>
         )}
 

@@ -1,3 +1,4 @@
+import { apiFetch } from '../lib/api';
 import { useEffect, useState } from 'react';
 import { MessageSquare, Star, Send, Trash2, X, Save } from 'lucide-react';
 import { CustomerComment } from '../../types';
@@ -24,7 +25,7 @@ export function CommentsAdminWidget() {
   const [message, setMessage] = useState<string | null>(null);
 
   const loadComments = async () => {
-    const res = await fetch('/api/comments');
+    const res = await apiFetch('/api/comments');
     if (res.ok) {
       const data = await res.json();
       setComments(Array.isArray(data) ? data : []);
@@ -50,7 +51,7 @@ export function CommentsAdminWidget() {
     setError(null);
     setMessage(null);
     try {
-      const res = await fetch(`/api/comments/${id}/reply`, {
+      const res = await apiFetch(`/api/comments/${id}/reply`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reply, adminName: adminName.trim() || 'Pine Flats' }),
@@ -75,7 +76,7 @@ export function CommentsAdminWidget() {
     setSavingId(id);
     setError(null);
     try {
-      const res = await fetch(`/api/comments/${id}/reply`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/comments/${id}/reply`, { method: 'DELETE' });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setError(data.error || 'Could not remove reply');
@@ -92,7 +93,7 @@ export function CommentsAdminWidget() {
     setSavingId(id);
     setError(null);
     try {
-      const res = await fetch(`/api/comments/${id}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/comments/${id}`, { method: 'DELETE' });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setError(data.error || 'Could not delete comment');

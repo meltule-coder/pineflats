@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { Photo, MediaType } from '../types';
+import { atomicWriteJson } from './persist';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const PHOTOS_FILE = path.join(DATA_DIR, 'photos.json');
@@ -19,7 +20,7 @@ function ensureDataDir() {
 export function getPhotos(): Photo[] {
   ensureDataDir();
   if (!fs.existsSync(PHOTOS_FILE)) {
-    fs.writeFileSync(PHOTOS_FILE, JSON.stringify(DEFAULT_PHOTOS, null, 2));
+    atomicWriteJson(PHOTOS_FILE, DEFAULT_PHOTOS);
     return DEFAULT_PHOTOS;
   }
   const photos = JSON.parse(fs.readFileSync(PHOTOS_FILE, 'utf-8')) as Photo[];
@@ -36,7 +37,7 @@ export function getPublishedPhotos(): Photo[] {
 
 export function savePhotos(photos: Photo[]) {
   ensureDataDir();
-  fs.writeFileSync(PHOTOS_FILE, JSON.stringify(photos, null, 2));
+  atomicWriteJson(PHOTOS_FILE, photos);
 }
 
 export function nextPhotoId(): string {

@@ -1,3 +1,4 @@
+import { apiFetch } from '../lib/api';
 import { useEffect, useRef, useState } from 'react';
 import {
   Upload, Link as LinkIcon, Globe, GlobeLock, Trash2, ChevronUp, ChevronDown,
@@ -24,7 +25,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadPhotos = async () => {
-    const res = await fetch('/api/photos');
+    const res = await apiFetch('/api/photos');
     if (res.ok) setPhotos(await res.json());
   };
 
@@ -41,7 +42,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
       const isVid = file.type.startsWith('video/');
       form.append('caption', captionInput.trim() || (isVid ? 'Park Video' : 'Park Photo'));
       form.append('published', publishOnAdd ? 'true' : 'false');
-      const res = await fetch('/api/photos/upload', { method: 'POST', body: form });
+      const res = await apiFetch('/api/photos/upload', { method: 'POST', body: form });
       if (res.ok) {
         await loadPhotos();
         onUpdate();
@@ -63,7 +64,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
     if (!urlInput.trim()) return;
     setIsLoading(true);
     try {
-      const res = await fetch('/api/photos', {
+      const res = await apiFetch('/api/photos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -87,7 +88,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
   };
 
   const togglePublished = async (photo: Photo) => {
-    const res = await fetch(`/api/photos/${photo.id}`, {
+    const res = await apiFetch(`/api/photos/${photo.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ published: !photo.published }),
@@ -99,7 +100,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
   };
 
   const saveCaption = async (id: string) => {
-    const res = await fetch(`/api/photos/${id}`, {
+    const res = await apiFetch(`/api/photos/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ caption: editCaption.trim() || 'Park media' }),
@@ -113,7 +114,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
 
   const removePhoto = async (id: string) => {
     if (!confirm('Remove this item from the library?')) return;
-    const res = await fetch(`/api/photos/${id}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/photos/${id}`, { method: 'DELETE' });
     if (res.ok) {
       await loadPhotos();
       onUpdate();
@@ -125,7 +126,7 @@ export function PhotosWidget({ onUpdate }: { onUpdate: () => void }) {
     if (target < 0 || target >= photos.length) return;
     const orderedIds = photos.map(p => p.id);
     [orderedIds[index], orderedIds[target]] = [orderedIds[target], orderedIds[index]];
-    const res = await fetch('/api/photos/reorder', {
+    const res = await apiFetch('/api/photos/reorder', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ orderedIds }),

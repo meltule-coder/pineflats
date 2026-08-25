@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pine Flats VPS Access</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="row">
+        <div class="logo">SSH</div>
+        <div>
+          <h1>Pine Flats VPS Access</h1>
+          <p>Desktop app · no browser needed</p>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <div class="toolbar">
+        <div>
+          <h2>SSH connections</h2>
+          <p class="sub">
+            Save VPS password, then <strong>Deploy app</strong> (Pine Flats to /opt/pineflats),
+            <strong>Install Grok</strong> (Grok Build CLI on the server), or <strong>Connect</strong> for SSH.
+          </p>
+        </div>
+        <button type="button" class="btn btn-primary" id="btn-add">+ Add connection</button>
+      </div>
+
+      <div id="alerts"></div>
+      <div id="form-root" hidden></div>
+      <div id="list"></div>
+    </main>
+
+    <footer>
+      <p>Connections are stored only on this computer.</p>
+      <button type="button" class="btn btn-ghost btn-sm" id="btn-data">Open data folder</button>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

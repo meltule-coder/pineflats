@@ -3,7 +3,7 @@ import { ArrowLeft, User, Phone, Mail, Truck, CreditCard, FileText, ArrowRight }
 import { BookingContactInfo, RentalType } from '../../types';
 import {
   DEFAULT_RENTAL_RATES,
-  calculateStayNights, calculateStayTotal, parseDateKey,
+  calculateStayNights, calculateStayBreakdown, parseDateKey,
   type RentalRatesConfig,
 } from '../../rentUtils';
 
@@ -97,7 +97,8 @@ export function BookingContactPage({
   const checkInDate = parseDateKey(checkIn);
   const checkOutDate = parseDateKey(checkOut);
   const nights = calculateStayNights(checkInDate, checkOutDate);
-  const total = calculateStayTotal(rentalType, checkInDate, checkOutDate, rates);
+  const breakdown = calculateStayBreakdown(rentalType, checkInDate, checkOutDate, rates);
+  const total = breakdown.grandTotal;
 
   const update = (key: keyof BookingContactInfo, value: string) => {
     setForm(prev => ({ ...prev, [key]: value }));
@@ -171,6 +172,11 @@ export function BookingContactPage({
             <div>
               <p className="text-[10px] uppercase tracking-widest text-[#5A6355] mb-1">Estimated Total</p>
               <p className="font-medium text-[#C29474]">{formatCurrency(total)} · {nights} night{nights === 1 ? '' : 's'}</p>
+              {breakdown.taxApplies && breakdown.totalTax > 0 && (
+                <p className="text-[10px] text-[#5A6355] mt-0.5">
+                  Incl. tax ({formatCurrency(breakdown.subtotal)} + {formatCurrency(breakdown.totalTax)})
+                </p>
+              )}
             </div>
           </div>
         </div>

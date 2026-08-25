@@ -1,0 +1,50 @@
+{
+  "name": "pineflats-vps-access",
+  "version": "1.0.0",
+  "description": "Standalone desktop app for Pine Flats VPS SSH access",
+  "main": "main.cjs",
+  "private": true,
+  "author": "Pine Flats",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable",
+    "dist:dir": "electron-builder --win dir"
+  },
+  "build": {
+    "appId": "com.pineflats.vps-access",
+    "productName": "Pine Flats VPS Access",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "deploy.cjs",
+      "install-grok.cjs",
+      "ssh-connect.cjs",
+      "index.html",
+      "app.js",
+      "styles.css",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "PineFlats-VPS-Access-${version}.exe"
+    }
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "ssh2": "^1.17.0"
+  }
+}

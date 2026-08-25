@@ -7,6 +7,16 @@ export interface PropertyRentalRates {
   weekly: number;
   dailyWeekday: number;
   dailyWeekend: number;
+  /**
+   * State transient lodging tax (%), applied to daily and weekly stays only.
+   * Example: 1.8 means 1.8%.
+   */
+  stateTransientTaxPercent?: number;
+  /**
+   * County transient lodging tax (%), applied to daily and weekly stays only.
+   * Example: 1.5 means 1.5%.
+   */
+  countyTransientTaxPercent?: number;
   /** Optional notes about rates, deposits, or stay rules */
   notes?: string;
 }
@@ -46,10 +56,17 @@ export interface Slot {
   tenantId?: string;
   startDate?: string;
   endDate?: string;
+  /**
+   * Short admin/public blurb for the pad itself (amenities, location, 30/50 amp, etc.).
+   * Persists across status changes — not guest contact notes or maintenance notes.
+   */
+  siteDescription?: string;
   notes?: string;
   contactName?: string;
   contactPhone?: string;
   contactEmail?: string;
+  /** Mailing / street address for the guest on this site */
+  contactAddress?: string;
   contactRvType?: string;
   contactLicensePlate?: string;
   contactEmergency?: string;
@@ -60,6 +77,16 @@ export interface Slot {
   imageUrl?: string;
   paymentMethod?: string;
   bookedAt?: string;
+  /** Last meter reading used as baseline for next usage (kWh). */
+  previousMeterReading?: number;
+  /** Included kWh credit before overage is charged (weekly / site stays). */
+  meterBaselineCredit?: number;
+  /** Latest usage total (kWh) from meter records. */
+  currentMeterUsage?: number;
+  /** Overage charge = max(0, usage − baseline) × $0.24. */
+  meterOverageCharge?: number;
+  /** Site meter history (newest first) — used for weekly overage billing. */
+  meterRecords?: MeterRecord[];
 }
 
 export interface Tenant {
@@ -74,10 +101,40 @@ export interface Tenant {
   description?: string;
   phone?: string;
   email?: string;
+  /** Mailing / street address */
+  address?: string;
   rvType?: string;
   licensePlate?: string;
   emergencyContact?: string;
   notes?: string;
+}
+
+/** Saved payment summary kept with previous (archived) tenant records. */
+export interface PreviousTenantPaymentSnapshot {
+  rentalType?: RentalType;
+  rentAmount?: number;
+  totalPaid?: number;
+  paymentCount?: number;
+  billingPeriod?: string;
+  records?: PaymentRecord[];
+  extraCharges?: ExtraCharge[];
+  credits?: PaymentCredit[];
+}
+
+/**
+ * Archived former tenant — kept after checkout/remove so park can look up history.
+ * Does not occupy a site.
+ */
+export interface PreviousTenantRecord {
+  id: string;
+  archivedAt: string;
+  /** How they entered the archive */
+  reason: 'checkout' | 'removed' | 'manual';
+  /** Optional free-text note at archive time */
+  archiveNote?: string;
+  /** Full tenant profile snapshot (includes original tenant id as tenant.id) */
+  tenant: Tenant;
+  payment?: PreviousTenantPaymentSnapshot;
 }
 
 export interface PaymentRecord {
@@ -231,6 +288,26 @@ export interface BookingContactInfo {
   contactNotes: string;
 }
 
+/**
+ * Safe card reference for renewals — brand + last 4 only.
+ * Never includes full PAN or CVV.
+ */
+export interface PaymentCardRef {
+  id: string;
+  brand: string;
+  last4: string;
+  guestName: string;
+  guestEmail?: string;
+  guestPhone?: string;
+  customerId?: string;
+  tenantId?: string;
+  site?: string;
+  isDefault?: boolean;
+  createdAt: string;
+  updatedAt?: string;
+  source?: 'tenant' | 'booking' | 'manual' | 'phone';
+}
+
 export interface StoredCustomer {
   id: string;
   name: string;
@@ -249,6 +326,12 @@ export interface ParkContact {
   contactName: string;
   address?: string;
   tagline: string;
+  /** Public-facing park / business name */
+  businessName?: string;
+  /** Logo URL shown on the public website (e.g. /logo.png or /uploads/...) */
+  logoUrl?: string;
+  /** Short about blurb for the public home page */
+  about?: string;
 }
 
 export interface CustomerComment {

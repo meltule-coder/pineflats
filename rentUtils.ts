@@ -57,7 +57,12 @@ export function allowsRentalType(
 
 export type RentalRatesConfig = Pick<
   PropertyRentalRates,
-  'monthly' | 'weekly' | 'dailyWeekday' | 'dailyWeekend'
+  | 'monthly'
+  | 'weekly'
+  | 'dailyWeekday'
+  | 'dailyWeekend'
+  | 'stateTransientTaxPercent'
+  | 'countyTransientTaxPercent'
 >;
 
 export const DEFAULT_RENTAL_RATES: RentalRatesConfig = {
@@ -65,7 +70,80 @@ export const DEFAULT_RENTAL_RATES: RentalRatesConfig = {
   weekly: WEEKLY_RENT,
   dailyWeekday: DAILY_RENT_WEEKDAY,
   dailyWeekend: DAILY_RENT_WEEKEND,
+  stateTransientTaxPercent: 0,
+  countyTransientTaxPercent: 0,
 };
+
+export type StayTaxBreakdown = {
+  /** Rent only (before tax) */
+  subtotal: number;
+  stateTaxPercent: number;
+  countyTaxPercent: number;
+  stateTax: number;
+  countyTax: number;
+  totalTax: number;
+  /** Rent + state + county tax */
+  grandTotal: number;
+  /** Tax applies only to daily / weekly stays */
+  taxApplies: boolean;
+};
+
+function roundMoney(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Transient tax % helpers (0–100 scale). */
+export function getStateTransientTaxPercent(rates: RentalRatesConfig = DEFAULT_RENTAL_RATES): number {
+  const n = Number(rates.stateTransientTaxPercent);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
+}
+
+export function getCountyTransientTaxPercent(rates: RentalRatesConfig = DEFAULT_RENTAL_RATES): number {
+  const n = Number(rates.countyTransientTaxPercent);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
+}
+
+/**
+ * Apply state + county transient tax to a rent subtotal.
+ * Only daily and weekly rentals are taxed; monthly is rent-only.
+ */
+export function calculateTransientTaxBreakdown(
+  rentalType: RentalType,
+  subtotal: number,
+  rates: RentalRatesConfig = DEFAULT_RENTAL_RATES
+): StayTaxBreakdown {
+  const stateTaxPercent = getStateTransientTaxPercent(rates);
+  const countyTaxPercent = getCountyTransientTaxPercent(rates);
+  const taxApplies = rentalType === 'daily' || rentalType === 'weekly';
+  const base = roundMoney(Math.max(0, subtotal));
+  if (!taxApplies || base <= 0) {
+    return {
+      subtotal: base,
+      stateTaxPercent,
+      countyTaxPercent,
+      stateTax: 0,
+      countyTax: 0,
+      totalTax: 0,
+      grandTotal: base,
+      taxApplies,
+    };
+  }
+  const stateTax = roundMoney(base * (stateTaxPercent / 100));
+  const countyTax = roundMoney(base * (countyTaxPercent / 100));
+  const totalTax = roundMoney(stateTax + countyTax);
+  return {
+    subtotal: base,
+    stateTaxPercent,
+    countyTaxPercent,
+    stateTax,
+    countyTax,
+    totalTax,
+    grandTotal: roundMoney(base + totalTax),
+    taxApplies,
+  };
+}
 
 export function getDailyRentForDate(
   date: Date = new Date(),
@@ -146,7 +224,8 @@ export function monthlyProrationDivisor(start: Date, end: Date): number {
   return MONTHLY_BILLING_DAYS;
 }
 
-export function calculateStayTotal(
+/** Rent only for a stay (before transient tax). */
+export function calculateStaySubtotal(
   rentalType: RentalType,
   checkIn: Date,
   checkOut: Date,
@@ -154,7 +233,8 @@ export function calculateStayTotal(
 ): number {
   const nights: Date[] = [];
   let cursor = new Date(checkIn);
-  while (cursor < checkOut) {
+  // Hard cap — prevents UI freeze if invalid far-future checkout slips through
+  for (let i = 0; i < 800 && cursor < checkOut; i++) {
     nights.push(new Date(cursor));
     cursor = addDays(cursor, 1);
   }
@@ -169,6 +249,32 @@ export function calculateStayTotal(
     return calculateWeeklyStayTotal(nights.length, rates);
   }
   return calculateMonthlyStayTotal(nights.length, checkIn, checkOut, rates.monthly);
+}
+
+/**
+ * Full amount due for a stay.
+ * Daily/weekly: rent + state + county transient tax.
+ * Monthly: rent only (no transient tax).
+ */
+export function calculateStayTotal(
+  rentalType: RentalType,
+  checkIn: Date,
+  checkOut: Date,
+  rates: RentalRatesConfig = DEFAULT_RENTAL_RATES
+): number {
+  const subtotal = calculateStaySubtotal(rentalType, checkIn, checkOut, rates);
+  return calculateTransientTaxBreakdown(rentalType, subtotal, rates).grandTotal;
+}
+
+/** Full breakdown (rent + taxes) for UI and receipts. */
+export function calculateStayBreakdown(
+  rentalType: RentalType,
+  checkIn: Date,
+  checkOut: Date,
+  rates: RentalRatesConfig = DEFAULT_RENTAL_RATES
+): StayTaxBreakdown {
+  const subtotal = calculateStaySubtotal(rentalType, checkIn, checkOut, rates);
+  return calculateTransientTaxBreakdown(rentalType, subtotal, rates);
 }
 
 export function calculateMonthlyStayTotal(

@@ -1,0 +1,48 @@
+Pine Flats VPS — add admin IP when SSH is locked out
+======================================================
+
+Your current public IP:  98.97.49.57
+Previously allowed IP:   69.36.202.47
+VPS:                     74.208.115.104
+
+SSH only allows listed IPs. When your home/office IP changes, you must add
+the new IP from the IONOS web console (KVM / VNC), not over SSH.
+
+Steps
+-----
+1. Log in to IONOS: https://my.ionos.com
+2. Open your VPS / Cloud Server for 74.208.115.104
+3. Open "Remote Console" / "KVM Console" / "Browser Console"
+4. Log in as root (same password as VPS Access app)
+5. Paste ALL of the commands below and press Enter
+
+Commands (adds both IPs; keeps website public)
+----------------------------------------------
+
+ufw allow from 98.97.49.57 to any port 22 proto tcp comment 'SSH admin 98.97.49.57'
+ufw allow from 69.36.202.47 to any port 22 proto tcp comment 'SSH admin 69.36.202.47'
+ufw status numbered
+
+Expected result
+---------------
+Status: active
+Default: deny (incoming)
+
+  80/tcp    ALLOW IN    Anywhere
+ 443/tcp    ALLOW IN    Anywhere
+  22/tcp    ALLOW IN    69.36.202.47
+  22/tcp    ALLOW IN    98.97.49.57
+ 3000/tcp   DENY  IN    Anywhere
+
+Then tell Grok "firewall updated" so we can verify SSH again.
+
+To allow only a brand-new IP (replace NEW.IP.HERE):
+-----------------------------------------------
+ufw allow from NEW.IP.HERE to any port 22 proto tcp comment 'SSH admin NEW.IP.HERE'
+ufw status numbered
+
+Notes
+-----
+- Website (ports 80 and 443) stays open to the whole internet so guests can book.
+- Port 22 (SSH) is admin-only and must list every IP that should manage the server.
+- If you use mobile hotspot or travel, your IP changes and must be added again.
